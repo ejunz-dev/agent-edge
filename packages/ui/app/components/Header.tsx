@@ -4,7 +4,7 @@ import {
   Tabs, Text, Title,
 } from '@mantine/core';
 import {
-  IconBalloonFilled, IconDeviceHeartMonitor, IconHome, IconPrinter, IconTerminal2,
+  IconApi, IconHome,
 } from '@tabler/icons-react';
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -13,10 +13,7 @@ const iconStyle = { width: rem(18), height: rem(18) };
 
 const mainLinks = [
   { link: '/', label: 'Dashboard', icon: <IconHome style={iconStyle} /> },
-  { link: '/print', label: 'Print', icon: <IconPrinter style={iconStyle} /> },
-  { link: '/balloon', label: 'Balloon', icon: <IconBalloonFilled style={iconStyle} /> },
-  { link: '/monitor', label: 'Monitor', icon: <IconDeviceHeartMonitor style={iconStyle} /> },
-  { link: '/commands', label: 'Commands', icon: <IconTerminal2 style={iconStyle} /> },
+  { link: '/mcp', label: 'MCP Logs', icon: <IconApi style={iconStyle} /> },
 ];
 
 export function Header() {
@@ -35,7 +32,9 @@ export function Header() {
         <Group justify="space-between" h="100%" px="md">
           <Title order={3}>
             Ejunz/agent-edge
+            { /* @ts-ignore */ }
             <Text hiddenFrom="xl">{window.Context.contest.id}</Text>
+            { /* @ts-ignore */ }
             <Text visibleFrom="xl">{window.Context.contest.name}</Text>
           </Title>
 

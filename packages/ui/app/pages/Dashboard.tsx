@@ -2,10 +2,10 @@ import {
   Group, Paper, SimpleGrid, Text,
 } from '@mantine/core';
 import {
-  IconBalloon, IconChecklist, IconMailCheck, IconMailForward, IconPrinter, IconSend2, IconUser, IconUserCheck, IconUserX,
+  IconApi, IconApiApp, IconChecklist, IconTool,
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
-import React, { useEffect } from 'react';
+import React from 'react';
 
 export function StatsCard({ title, value, Icon }) {
   return (
@@ -27,62 +27,36 @@ export function StatsCard({ title, value, Icon }) {
 }
 
 export default function Dashboard() {
-  const query = useQuery({
-    queryKey: ['metrics'],
-    queryFn: () => fetch('/metrics', {
-      headers: { 'Accept': 'application/json' },
-    }).then((res) => res.json()),
+  const { data: serversData } = useQuery({
+    queryKey: ['mcp_servers'],
+    queryFn: () => fetch('/mcp/servers').then((res) => res.json()),
     refetchInterval: 30000,
   });
 
-  const [machinesOnline, setMachinesOnline] = React.useState(0);
-  const [machinesOffline, setMachinesOffline] = React.useState(0);
-  const [printTaskNew, setPrintTasksNew] = React.useState(0);
-  const [printTaskSent, setPrintTasksSent] = React.useState(0);
-  const [printTaskDone, setPrintTasksDone] = React.useState(0);
-  const [balloonTaskNew, setBalloonTasksNew] = React.useState(0);
-  const [balloonTaskSent, setBalloonTasksSent] = React.useState(0);
-  const [balloonTaskDone, setBalloonTasksDone] = React.useState(0);
+  const { data: toolsData } = useQuery({
+    queryKey: ['mcp_tools'],
+    queryFn: () => fetch('/mcp/tools').then((res) => res.json()),
+    refetchInterval: 30000,
+  });
 
-  useEffect(() => {
-    if (!query.data) return;
-    const machines: { online: number, offline: number } = { online: 0, offline: 0 };
-    for (const metric of query.data.find((d) => d.name === 'xcpc_machinecount').values) {
-      machines[metric.labels.status] += metric.value;
-    }
-    setMachinesOnline(machines.online);
-    setMachinesOffline(machines.offline);
-    const printTasks: { new: number, sent: number, done: number } = { new: 0, sent: 0, done: 0 };
-    for (const metric of query.data.find((d) => d.name === 'xcpc_printcount').values) {
-      printTasks[metric.labels.status] += metric.value;
-    }
-    setPrintTasksNew(printTasks.new);
-    setPrintTasksSent(printTasks.sent);
-    setPrintTasksDone(printTasks.done);
-    const balloonTasks: { new: number, sent: number, done: number } = { new: 0, sent: 0, done: 0 };
-    for (const metric of query.data.find((d) => d.name === 'xcpc_ballooncount').values) {
-      balloonTasks[metric.labels.status] += metric.value;
-    }
-    setBalloonTasksNew(balloonTasks.new);
-    setBalloonTasksSent(balloonTasks.sent);
-    setBalloonTasksDone(balloonTasks.done);
-  }, [query.data]);
+  const serverCount = serversData?.servers?.length || 0;
+  const onlineServers = serversData?.servers?.filter((s: any) => s.status === 'online').length || 0;
+  const offlineServers = serverCount - onlineServers;
+  const toolCount = toolsData?.tools?.length || 0;
+  const totalCalls = serversData?.servers?.reduce((sum: number, s: any) => sum + (s.totalCalls || 0), 0) || 0;
+  const totalTools = serversData?.servers?.reduce((sum: number, s: any) => sum + (s.toolCount || 0), 0) || 0;
+
   return (
     <div>
       <SimpleGrid cols={{ base: 1, xs: 2, md: 3 }} m="lg">
-        <StatsCard title="Machines Online" value={machinesOnline} Icon={IconUserCheck} />
-        <StatsCard title="Machines Offline" value={machinesOffline} Icon={IconUserX} />
-        <StatsCard title="Machines Total" value={machinesOnline + machinesOffline} Icon={IconUser} />
+        <StatsCard title="MCP 服务器 (在线)" value={onlineServers} Icon={IconApi} />
+        <StatsCard title="MCP 服务器 (离线)" value={offlineServers} Icon={IconApiApp} />
+        <StatsCard title="服务器总数" value={serverCount} Icon={IconChecklist} />
       </SimpleGrid>
       <SimpleGrid cols={{ base: 1, xs: 2, md: 3 }} m="lg">
-        <StatsCard title="Print Tasks New" value={printTaskNew} Icon={IconPrinter} />
-        <StatsCard title="Print Tasks Sent" value={printTaskSent} Icon={IconMailForward} />
-        <StatsCard title="Print Tasks Done" value={printTaskDone} Icon={IconMailCheck} />
-      </SimpleGrid>
-      <SimpleGrid cols={{ base: 1, xs: 2, md: 3 }} m="lg">
-        <StatsCard title="Balloon Tasks New" value={balloonTaskNew} Icon={IconBalloon} />
-        <StatsCard title="Balloon Tasks Sent" value={balloonTaskSent} Icon={IconSend2} />
-        <StatsCard title="Balloon Tasks Done" value={balloonTaskDone} Icon={IconChecklist} />
+        <StatsCard title="工具总数" value={toolCount} Icon={IconTool} />
+        <StatsCard title="工具数量 (所有服务器)" value={totalTools} Icon={IconApi} />
+        <StatsCard title="总调用次数" value={totalCalls} Icon={IconChecklist} />
       </SimpleGrid>
     </div>
   );

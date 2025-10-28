@@ -25,24 +25,18 @@ try {
 async function applyServer(ctx: Context) {
     await Promise.all([
         ctx.plugin(require('./service/server')),
-        ctx.plugin(require('./service/fetcher')),
     ]);
-    await ctx.inject(['server', 'dbservice', 'fetcher'], async (c) => {
+    await ctx.inject(['server', 'dbservice'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/misc')),
-            c.plugin(require('./handler/printer')),
-            c.plugin(require('./handler/monitor'), config.monitor),
-            c.plugin(require('./handler/client')),
-            c.plugin(require('./handler/balloon')),
-            c.plugin(require('./handler/commands')),
+            c.plugin(require('./handler/mcp')),
         ]);
         c.server.listen();
     });
 }
 
 function applyClient(ctx: Context) {
-    if (config.printers?.length) ctx.plugin(require('./client/printer'));
-    if (config.balloon) ctx.plugin(require('./client/balloon'));
+    // Client functionality removed
 }
 
 async function apply(ctx) {

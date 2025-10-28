@@ -12,86 +12,34 @@ declare module 'cordis' {
 
 export type VoidReturn = Promise<any> | any;
 
-export interface PrintCodeDoc {
+export interface MCPLogDoc {
     _id: string;
-    tid: string;
-    team: string;
-    location: string;
-    filename: string;
-    lang: string;
-    printer: string;
-    createAt: number;
-    done?: number;
-    receivedAt?: number;
-    doneAt?: number;
-    code?: string;
+    timestamp: number;
+    level: 'info' | 'warn' | 'error' | 'debug';
+    message: string;
+    tool?: string;
+    metadata?: Record<string, any>;
 }
 
-export interface MonitorDoc {
+export interface MCPToolDoc {
     _id: string;
-    mac: string;
-    version: string;
-    uptime: number;
-    hostname: string;
-    ip: string;
-    updateAt: number;
-    // new version collect
-    name?: string;
-    group?: string;
-    os?: string;
-    kernel?: string;
-    cpu?: string;
-    cpuUsed?: number;
-    memory?: string;
-    memoryUsed?: number;
-    camera?: string;
-    desktop?: string;
-}
-
-export interface ClientDoc {
-    _id: string;
-    id: string;
     name: string;
-    type: string;
-    subType?: string;
-    group?: string[];
-
-    // for print client
-    printer?: string[];
-    printersInfo?: any[];
-
-    // for ballon client
-    token?: string;
-    chatId?: string;
-    endpoint?: string;
-    template?: string;
+    description: string;
+    server: string;
+    callCount: number;
+    lastCalled?: number;
+    createdAt: number;
+    metadata?: Record<string, any>;
 }
 
-export interface BalloonDoc {
+export interface MCPServerDoc {
     _id: string;
-    balloonid: string;
-    time: number;
-    problem: string;
-    contestproblem: any;
-    team: string;
-    teamid: string;
-    location: string;
-    awards: string;
-    done: boolean;
-    printDone: boolean;
-    receivedAt?: number;
-    printAt?: number;
-}
-
-export interface TeamDoc {
-    _id: string;
-    id: string;
-    organization_id: string;
-    hidden: boolean;
-    group_ids: string[];
-    affiliation: string;
     name: string;
-    display_name: string;
-    public_description: string;
-    romm: string;
+    endpoint: string;
+    status: 'online' | 'offline';
+    toolCount: number;
+    totalCalls: number;
+    lastUpdate: number;
+    createdAt: number;
+    metadata?: Record<string, any>;
 }

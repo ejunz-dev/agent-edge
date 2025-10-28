@@ -2,16 +2,14 @@ import path from 'node:path';
 import { Context, Service } from 'cordis';
 import Datastore from 'nedb-promises';
 import {
-    BalloonDoc, ClientDoc, MonitorDoc, PrintCodeDoc, TeamDoc,
+    MCPLogDoc, MCPServerDoc, MCPToolDoc,
 } from '../interface';
 import { fs } from '../utils';
 
 export interface Collections {
-    code: PrintCodeDoc;
-    monitor: MonitorDoc;
-    client: ClientDoc;
-    balloon: BalloonDoc;
-    teams: TeamDoc;
+    mcplog: MCPLogDoc;
+    mcpserver: MCPServerDoc;
+    mcptool: MCPToolDoc;
 }
 
 declare module 'cordis' {
@@ -39,10 +37,8 @@ export default class DBService extends Service {
     }
 
     async [Service.init]() {
-        await this.initDatabase('code', ['_id', 'createAt', 'done', 'printer', 'deleted']);
-        await this.initDatabase('monitor', ['_id', 'mac', 'name', 'group']);
-        await this.initDatabase('client', ['id', 'name', 'type', 'group']);
-        await this.initDatabase('balloon', ['id', 'time', 'problem', 'teamid', 'awards', 'done', 'printDone']);
-        await this.initDatabase('teams', []);
+        await this.initDatabase('mcplog', ['_id', 'timestamp', 'level', 'tool']);
+        await this.initDatabase('mcpserver', ['_id', 'name', 'endpoint', 'status', 'lastUpdate']);
+        await this.initDatabase('mcptool', ['_id', 'name', 'server', 'callCount']);
     }
 }

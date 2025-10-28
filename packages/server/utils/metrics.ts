@@ -8,12 +8,7 @@ declare module 'cordis' {
         metrics: Registry;
     }
     interface Events {
-        'print/newTask': (count: number) => void;
-        'print/sendTask': (client: string) => void;
-        'print/doneTask': (client: string, printer: string) => void;
-        'balloon/newTask': (count: number) => void;
-        'balloon/sendTask': (client: string, count: number) => void;
-        'balloon/doneTask': (client: string, count: number) => void;
+        'mcp/tool/call': (server: string, tool: string) => void;
     }
 }
 
@@ -28,33 +23,38 @@ export function createMetricsRegistry(ctx: Context) {
         return metric as any;
     }
 
-    createMetric(Gauge, 'xcpc_machinecount', 'machinecount', {
+    // MCP 服务器状态
+    createMetric(Gauge, 'mcp_server_status', 'MCP server status', {
         labelNames: ['status'],
         async collect() {
-            const machines = await ctx.db.monitor.find({});
-            const onlines = machines.filter((m) => m.updateAt > new Date().getTime() - 1000 * 120);
-            this.set({ status: 'online' }, onlines.length);
-            this.set({ status: 'offline' }, machines.length - onlines.length);
+            const servers = await ctx.db.mcpserver.find({});
+            const online = servers.filter((s) => s.status === 'online').length;
+            const offline = servers.filter((s) => s.status === 'offline').length;
+            this.set({ status: 'online' }, online);
+            this.set({ status: 'offline' }, offline);
         },
     });
 
-    const printTaskCounter = createMetric(Counter, 'xcpc_printcount', 'printcount', {
-        labelNames: ['status', 'client', 'printer'],
+    // MCP 工具数量
+    createMetric(Gauge, 'mcp_tool_count', 'MCP tool count', {
+        labelNames: ['server'],
+        async collect() {
+            const servers = await ctx.db.mcpserver.find({});
+            for (const server of servers) {
+                const tools = await ctx.db.mcptool.find({ server: server.name });
+                this.set({ server: server.name }, tools.length);
+            }
+        },
     });
-    ctx.on('print/newTask', (count) => printTaskCounter.inc({ status: 'new' }, count));
 
-    ctx.on('print/sendTask', (client) => printTaskCounter.inc({ status: 'sent', client }));
-
-    ctx.on('print/doneTask', (client, printer) => printTaskCounter.inc({ status: 'done', client, printer }));
-
-    const balloonTaskCounter = createMetric(Counter, 'xcpc_ballooncount', 'ballooncount', {
-        labelNames: ['status', 'client'],
+    // MCP 工具调用计数器
+    const mcpToolCallCounter = createMetric(Counter, 'mcp_tool_calls', 'MCP tool calls', {
+        labelNames: ['server', 'tool'],
     });
-    ctx.on('balloon/newTask', (count) => balloonTaskCounter.inc({ status: 'new' }, count));
 
-    ctx.on('balloon/sendTask', (client, count) => balloonTaskCounter.inc({ status: 'sent', client }, count));
-
-    ctx.on('balloon/doneTask', (client, count) => balloonTaskCounter.inc({ status: 'done', client }, count));
+    ctx.on('mcp/tool/call', (server, tool) => {
+        mcpToolCallCounter.inc({ server, tool });
+    });
 
     collectDefaultMetrics({ register: registry });
 

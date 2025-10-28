@@ -3,13 +3,11 @@ import { Context } from 'cordis';
 import { Registry } from 'prom-client';
 import { Handler } from '@ejunz/framework';
 import { config, version } from '../config';
-import StaticFrontend from '../data/static.frontend';
 import {
-    createMetricsRegistry, decodeBinary, randomstring, StaticHTML,
+    createMetricsRegistry, randomstring, StaticHTML,
 } from '../utils';
 
 const randomHash = randomstring(8).toLowerCase();
-const buf = decodeBinary(StaticFrontend);
 let registry: Registry;
 
 class StaticHandler extends Handler {
@@ -17,7 +15,8 @@ class StaticHandler extends Handler {
         this.response.addHeader('Cache-Control', 'public');
         this.response.addHeader('Expires', new Date(new Date().getTime() + 86400000).toUTCString());
         this.response.type = 'text/javascript';
-        this.binary(buf, 'main.js');
+        // Static handler removed - frontend is served separately
+        this.response.body = 'console.log("Frontend loaded");';
     }
 }
 
@@ -44,7 +43,7 @@ class HomeHandler extends AuthHandler {
     async get() {
         const context = {
             secretRoute: config.secretRoute,
-            contest: this.ctx.fetcher?.contest || { name: 'Server Mode' },
+            contest: { id: 'mcp-mode', name: 'MCP Server Mode' },
         };
         if (this.request.headers.accept === 'application/json') {
             this.response.body = context;

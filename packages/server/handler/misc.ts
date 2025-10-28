@@ -74,7 +74,7 @@ class VersionHandler extends Handler {
 
     async get() {
         this.response.body = {
-            program: '@hydro/xcpc-tools',
+            program: '@ejunz/agent-edge',
             version,
         };
         this.response.addHeader('Access-Control-Allow-Origin', '*');

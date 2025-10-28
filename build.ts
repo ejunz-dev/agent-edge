@@ -61,12 +61,12 @@ const nopMap = '//# sourceMappingURL=data:application/json;base64,eyJ2ZXJzaW9uIj
     if (res.errors.length) console.error(res.errors);
     if (res.warnings.length) console.warn(res.warnings);
     logger.info(`Resource Size: ${size(res.outputFiles[0].text)}`);
-    fs.writeFileSync(path.resolve(process.cwd(), 'dist/xcpc-tools.js'), res.outputFiles[0].text);
+    fs.writeFileSync(path.resolve(process.cwd(), 'dist/agent-edge.js'), res.outputFiles[0].text);
     fs.writeFileSync(path.resolve(process.cwd(), 'dist/metafile.json'), JSON.stringify(res.metafile));
-    logger.info('Saved to dist/xcpc-tools.js');
+    logger.info('Saved to dist/agent-edge.js');
     if (!process.env.SEA) return;
     fs.writeFileSync(path.resolve(process.cwd(), 'dist/sea-config.json'), JSON.stringify({
-        main: 'xcpc-tools.js',
+        main: 'agent-edge.js',
         output: 'sea-prep.blob',
     }));
     child.execSync('node --experimental-sea-config sea-config.json', { cwd: path.resolve(process.cwd(), 'dist') });

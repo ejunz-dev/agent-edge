@@ -1,6 +1,6 @@
 import { Context } from 'cordis';
 import proxy from 'koa-proxies';
-import { ForbiddenError, HydroError, NotFoundError, UserFacingError, WebService } from '@ejunz/framework';
+import { ForbiddenError, EjunzError, NotFoundError, UserFacingError, WebService } from '@ejunz/framework';
 import { config } from '../config';
 import { randomstring } from '../utils';
 import { errorMessage } from '@ejunz/utils';
@@ -34,7 +34,7 @@ export async function apply(pluginContext: Context) {
                         res.setHeader('Access-Control-Allow-Headers', corsAllowHeaders);
                         res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
                         res.setHeader('Access-Control-Allow-Credentials', 'true');
-                        res.setHeader('X-Proxy-By', 'hydro-dev/xcpc-tools');
+                        res.setHeader('X-Proxy-By', 'ejunz-dev/agent-edge');
 
                         // https://github.com/vercel/next.js/blob/main/packages/next/src/server/lib/router-utils/proxy-request.ts
                         const cleanup = (err: Error) => {
@@ -58,7 +58,7 @@ export async function apply(pluginContext: Context) {
             })(ctx, next);
         });
         server.httpHandlerMixin({
-            async onerror(error: HydroError) {
+            async onerror(error: EjunzError) {
                 error.msg ||= () => error.message;
                 if (error instanceof UserFacingError && !process.env.DEV) error.stack = '';
                 if (!(error instanceof NotFoundError) && !('nolog' in error)) {
@@ -74,7 +74,7 @@ export async function apply(pluginContext: Context) {
             },
         });
         server.wsHandlerMixin({
-            async onerror(err: HydroError) {
+            async onerror(err: EjunzError) {
                 console.error(`Path:${this.request.path}`);
                 console.error(err);
                 if (err instanceof UserFacingError) err.stack = this.request.path;

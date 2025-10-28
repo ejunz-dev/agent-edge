@@ -1,2 +1,1 @@
-# agent-client
- 
+# Ejunz/agent-edge

@@ -12,7 +12,7 @@ process.on('unhandledRejection', (e) => { logger.error(e); });
 process.on('uncaughtException', (e) => { logger.error(e); });
 Error.stackTraceLimit = 50;
 const app = new Context();
-const tmpdir = path.resolve(os.tmpdir(), 'xcpc-tools');
+const tmpdir = path.resolve(os.tmpdir(), 'agent-edge');
 fs.ensureDirSync(tmpdir);
 
 let config;

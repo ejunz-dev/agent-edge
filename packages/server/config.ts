@@ -13,30 +13,6 @@ const isClient = process.argv.includes('--client');
 const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : 'server'}.yaml`);
 fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
-const balloonTemplateDefault = `\
-#align center
-
-#bold true
-#size 2
-%RECEIPT
-
-{id}
-
-#bold false
-#size 1
-===============================
-
-#oneLine %LOCATION {location}
-#oneLine %PROBLEM {problem}
-#oneLine %COLOR {color}
-#oneLine %COMMENT {comment}
-#align center
-#bold true
-#size 0
-%TEAM: {team}
-%STATUS: {status}
-Time: {time}`;
-
 // eslint-disable-next-line import/no-mutable-exports
 export let exit: Promise<void> | null = null;
 
@@ -44,7 +20,7 @@ if (!fs.existsSync(configPath)) {
     // eslint-disable-next-line no-promise-executor-return
     exit = new Promise((resolve) => (async () => {
         const serverConfigDefault = `\
-type: server # server | domjudge | hydro
+type: server # server | domjudge | ejunz
 viewPass: ${randomstring(8)} # use admin / viewPass to login
 secretRoute: ${randomstring(12)}
 seatFile: /home/icpc/Desktop/seats.txt
@@ -71,7 +47,6 @@ monitor:
             balloonType: 80,
             printColor: false,
             printers,
-            balloonTemplate: balloonTemplateDefault,
         });
         fs.writeFileSync(configPath, isClient ? clientConfigDefault : serverConfigDefault);
         logger.error('Config file generated, please fill in the config.yaml');
@@ -85,7 +60,7 @@ const serverSchema = Schema.intersect([
         type: Schema.union([
             Schema.const('server'),
             Schema.const('domjudge'),
-            Schema.const('hydro'),
+            Schema.const('ejunz'),
         ] as const).description('server type').required(),
         port: Schema.number().default(5283),
         xhost: Schema.string().default('x-forwarded-host'),
@@ -101,7 +76,7 @@ const serverSchema = Schema.intersect([
         Schema.object({
             type: Schema.union([
                 Schema.const('domjudge'),
-                Schema.const('hydro'),
+                Schema.const('ejunz'),
             ] as const).required(),
             server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
             contestId: Schema.string(),
@@ -121,7 +96,6 @@ const clientSchema = Schema.object({
     balloonLang: Schema.union(['zh', 'en']).default('zh').required(),
     balloonType: Schema.union([58, 80, 'plain']).default(80),
     balloonCommand: Schema.string().default(''),
-    balloonTemplate: Schema.string().default(balloonTemplateDefault),
     printColor: Schema.boolean().default(false),
     printPageMax: Schema.number().default(5),
     printMergeQueue: Schema.number().default(1),
@@ -137,5 +111,5 @@ export const saveConfig = () => {
 export const version = packageVersion;
 
 logger.info(`Config loaded from ${configPath}`);
-logger.info(`xcpc-tools version: ${packageVersion}`);
+logger.info(`agent-edge version: ${packageVersion}`);
 if (!isClient && !exit) logger.info(`Server View User Info: admin / ${config.viewPass}`);

@@ -176,7 +176,7 @@ class DOMjudgeFetcher extends BasicFetcher {
     }
 }
 
-class HydroFetcher extends BasicFetcher {
+class EjunzFetcher extends BasicFetcher {
     async contestInfo() {
         const ids = config.contestId.split('/');
         const [domainId, contestId] = ids.length === 2 ? ids : ['system', config.contestId];
@@ -301,7 +301,7 @@ class HydroFetcher extends BasicFetcher {
 const fetcherList = {
     server: BasicFetcher,
     domjudge: DOMjudgeFetcher,
-    hydro: HydroFetcher,
+    ejunz: EjunzFetcher,
 };
 
 export async function apply(ctx: Context) {

@@ -3,6 +3,8 @@ import { Context } from 'cordis';
 import { Registry } from 'prom-client';
 import { Handler } from '@ejunz/framework';
 import { config, version } from '../config';
+import path from 'node:path';
+import { fs } from '../utils';
 import {
     createMetricsRegistry, randomstring, StaticHTML,
 } from '../utils';
@@ -15,8 +17,17 @@ class StaticHandler extends Handler {
         this.response.addHeader('Cache-Control', 'public');
         this.response.addHeader('Expires', new Date(new Date().getTime() + 86400000).toUTCString());
         this.response.type = 'text/javascript';
-        // Static handler removed - frontend is served separately
-        this.response.body = 'console.log("Frontend loaded");';
+        // Serve built frontend bundle if available, otherwise fallback
+        try {
+            const bundlePath = path.resolve(__dirname, '../data/static.frontend');
+            if (fs.existsSync(bundlePath)) {
+                this.response.body = fs.readFileSync(bundlePath, 'utf-8');
+            } else {
+                this.response.body = 'console.log("Frontend bundle not found. Please run `yarn build:ui`.")';
+            }
+        } catch (e) {
+            this.response.body = 'console.log("Failed to load frontend bundle.")';
+        }
     }
 }
 

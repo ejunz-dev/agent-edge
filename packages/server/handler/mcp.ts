@@ -1,94 +1,11 @@
 import { Context } from 'cordis';
-import { BadRequestError, Handler, ConnectionHandler } from '@ejunz/framework';
-import { Server as MCPServer } from '@modelcontextprotocol/sdk/server/index.js';
-import {
-    CallToolRequestSchema,
-    ListToolsRequestSchema,
-    ListResourcesRequestSchema,
-    ReadResourceRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-import { Logger, randomstring } from '../utils';
-import { AuthHandler } from './misc';
-import { callTool, listTools } from '../mcp-tools';
+import { Handler } from '@ejunz/framework';
+import { createMCPDispatchers } from '../model/mcp';
+import { Logger } from '../utils';
 
 const logger = new Logger('handler/mcp');
 
-// 全局 MCP Server（使用 SDK）
-const mcpServer = new MCPServer({
-    name: 'remote-mcp-server',
-    version: '1.0.0',
-});
-
-function getMCPTools() {
-    // 将内部工具注册表转换为 MCP 规范：{ name, description, inputSchema }
-    const tools = listTools().map((t: any) => ({
-        name: t.name,
-        description: t.description,
-        inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
-    }));
-    return tools;
-}
-
-// 注册工具列表
-mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: getMCPTools() }));
-
-// 注册工具调用
-mcpServer.setRequestHandler(CallToolRequestSchema, async (request: any) => {
-    const { name, arguments: args } = request.params || {};
-    const result = await callTool((global as any).__cordis_ctx || ({} as Context), { name, arguments: args || {} });
-    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-});
-
-// 注册资源列表（示例）
-mcpServer.setRequestHandler(ListResourcesRequestSchema, async () => ({
-    resources: [
-        { uri: 'file:///tmp/example.txt', name: '示例文件', description: '一个示例文本文件', mimeType: 'text/plain' },
-        { uri: '/mcp/api/info', name: '服务器信息', description: '服务器状态信息', mimeType: 'application/json' },
-    ],
-}));
-
-// 注册资源读取（示例）
-mcpServer.setRequestHandler(ReadResourceRequestSchema, async (request: any) => {
-    const { uri } = request.params || {};
-    if (uri === 'file:///tmp/example.txt') {
-        return { contents: [{ uri, mimeType: 'text/plain', text: '这是一个示例文件的内容。' }] };
-    }
-    if (uri === '/mcp/api/info') {
-        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({
-            server: 'Remote MCP Server', version: '1.0.0', uptime: process.uptime(), timestamp: new Date().toISOString(),
-        }) }] };
-    }
-    throw new Error(`资源不存在: ${uri}`);
-});
-
-// 本地分发映射，避免直接访问 SDK 内部实现
-const sdkDispatchers: Record<string, (ctx: Context, req: any) => Promise<any>> = {
-    'tools/list': async () => ({ tools: getMCPTools() }),
-    'tools/call': async (ctx, request) => {
-        const { name, arguments: args } = request.params || {};
-        const result = await callTool(ctx, { name, arguments: args || {} });
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-    },
-    'resources/list': async () => ({
-        resources: [
-            { uri: 'file:///tmp/example.txt', name: '示例文件', description: '一个示例文本文件', mimeType: 'text/plain' },
-            { uri: '/mcp/api/info', name: '服务器信息', description: '服务器状态信息', mimeType: 'application/json' },
-        ],
-    }),
-    'resources/read': async (_ctx, request) => {
-        const { uri } = request.params || {};
-        if (uri === 'file:///tmp/example.txt') {
-            return { contents: [{ uri, mimeType: 'text/plain', text: '这是一个示例文件的内容。' }] };
-        }
-        if (uri === '/mcp/api/info') {
-            return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({
-                server: 'Remote MCP Server', version: '1.0.0', uptime: process.uptime(), timestamp: new Date().toISOString(),
-            }) }] };
-        }
-        throw new Error(`资源不存在: ${uri}`);
-    },
-    'notifications/initialized': async () => ({}),
-};
+const sdkDispatchers: Record<string, (ctx: Context, req: any) => Promise<any>> = createMCPDispatchers();
 
 class MCPApiRootHandler extends Handler<Context> {
     allowCors = true;

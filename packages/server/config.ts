@@ -20,18 +20,24 @@ if (!fs.existsSync(configPath)) {
     // eslint-disable-next-line no-promise-executor-return
     exit = new Promise((resolve) => (async () => {
         const serverConfigDefault = `\
-type: server # server | domjudge | ejunz
-viewPass: ${randomstring(8)} # use admin / viewPass to login
-secretRoute: ${randomstring(12)}
-seatFile: /home/icpc/Desktop/seats.txt
-customKeyfile: 
-# if type is server, the following is not needed
-server: 
-token: 
-username: 
-password: 
-monitor:
-  timeSync: false
+# 仅需填写 host，其它保持注释既可
+host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
+
+# 下面是可选项，暂不需要使用，保留注释
+# type: server # server | domjudge | ejunz
+# port: 5283
+# xhost: x-forwarded-host
+# viewPass: ${randomstring(8)} # use admin / viewPass to login
+# secretRoute: ${randomstring(12)}
+# seatFile: /home/icpc/Desktop/seats.txt
+# customKeyfile: 
+# edgeUpstream: '' # e.g. ws://host:port/edge/conn
+# server: 
+# token: 
+# username: 
+# password: 
+# monitor:
+#   timeSync: false
 `;
         let printers = [];
         if (isClient) {
@@ -55,41 +61,21 @@ monitor:
     throw new Error('no-config');
 }
 
-const serverSchema = Schema.intersect([
-    Schema.object({
-        type: Schema.union([
-            Schema.const('server'),
-            Schema.const('domjudge'),
-            Schema.const('ejunz'),
-        ] as const).description('server type').required(),
-        port: Schema.number().default(5283),
-        xhost: Schema.string().default('x-forwarded-host'),
-        viewPass: Schema.string().default(randomstring(8)),
-        secretRoute: Schema.string().default(randomstring(12)),
-        seatFile: Schema.string().default('/home/icpc/Desktop/seat.txt'),
-        customKeyfile: Schema.string().default(''),
-        monitor: Schema.object({
-            timeSync: Schema.boolean().default(false),
-        }).default({ timeSync: false }),
-    }).description('Basic Config'),
-    Schema.union([
-        Schema.object({
-            type: Schema.union([
-                Schema.const('domjudge'),
-                Schema.const('ejunz'),
-            ] as const).required(),
-            server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
-            contestId: Schema.string(),
-            token: Schema.string(),
-            username: Schema.string(),
-            password: Schema.string(),
-            freezeEncourage: Schema.number().default(0),
-        }).description('Fetcher Config'),
-        Schema.object({
-            type: Schema.const('server').required(),
-        }).description('Server Mode Config'),
-    ]),
-]);
+const serverSchema = Schema.object({
+    // 为最简配置而精简，仅保留 host 与必要默认项
+    host: Schema.string().default(''),
+    edgeUpstream: Schema.string().default(''),
+    // 保留以下默认项以兼容日志与现有代码（无需在配置中填写）
+    port: Schema.number().default(5283),
+    xhost: Schema.string().default('x-forwarded-host'),
+    viewPass: Schema.string().default(randomstring(8)),
+    secretRoute: Schema.string().default(randomstring(12)),
+    seatFile: Schema.string().default('/home/icpc/Desktop/seat.txt'),
+    customKeyfile: Schema.string().default(''),
+    monitor: Schema.object({
+        timeSync: Schema.boolean().default(false),
+    }).default({ timeSync: false }),
+}).description('Basic Config');
 const clientSchema = Schema.object({
     server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
     balloon: Schema.string(),

@@ -1,9 +1,19 @@
 import { Context } from 'cordis';
-import { Logger } from './utils';
+import { Logger } from '@ejunz/utils';
 import { config } from './config';
 import { createMCPDispatchers } from './model/mcp';
 
-const logger = new Logger('ejunz');
+const logger = new Logger('edge');
+const mcpLogger = new Logger('ejunz');
+
+const ANSI = {
+    reset: '\x1b[0m',
+    bold: '\x1b[1m',
+    yellow: '\x1b[33m',
+};
+function highlight(name: string) {
+    return `${ANSI.bold}${ANSI.yellow}'${name}'${ANSI.reset}`;
+}
 
 function normalizeUpstreamFromHost(host: string): string {
     if (!host) return '';
@@ -90,8 +100,7 @@ function startConnecting(ctx?: Context) {
                 try { ws.send('pong'); } catch { /* ignore */ }
                 return;
             }
-            logger.debug?.('上游消息：%s', text.slice(0, 2000));
-            // 处理上游的 JSON-RPC 请求以提供 MCP 工具
+            // 尝试按 JSON-RPC 处理（若非 JSON，再做原始调试日志）
             try {
                 const parseMaybeNested = (raw: string): any => {
                     let parsed: any = JSON.parse(raw);
@@ -111,6 +120,12 @@ function startConnecting(ctx?: Context) {
                         } catch { /* ignore */ }
                     };
                     if (!method) return;
+                    const toolName = req?.params?.name;
+                    if (method === 'tools/call' && toolName) {
+                        try { mcpLogger.info('MCP 调用: %s id=%s args=%o', highlight(toolName), id, req?.params?.arguments || {}); } catch {}
+                    } else {
+                        try { mcpLogger.info('MCP 请求: %s id=%s', highlight(method), id); } catch {}
+                    }
                     if (method === 'initialize') {
                         reply({
                             result: {
@@ -119,18 +134,26 @@ function startConnecting(ctx?: Context) {
                                 serverInfo: { name: 'agent-edge-bridge', version: '1.0.0' },
                             },
                         });
+                        try { mcpLogger.info('MCP 回复: %s id=%s (initialize)', highlight(method), id); } catch {}
                         return;
                     }
                     if (sdkDispatchers[method]) {
                         try {
                             const result = await sdkDispatchers[method](ctx as any, req);
                             reply({ result });
+                            if (method === 'tools/call' && toolName) {
+                                try { mcpLogger.info('MCP 返回: %s id=%s result=%o', highlight(toolName), id, result); } catch {}
+                            } else {
+                                try { mcpLogger.info('MCP 回复: %s id=%s (ok) result=%o', method, id, result); } catch {}
+                            }
                         } catch (e) {
                             reply({ error: { code: -32603, message: (e as Error).message } });
+                            try { mcpLogger.warn('MCP 错误: %s id=%s %s', method, id, (e as Error).message); } catch {}
                         }
                         return;
                     }
                     reply({ error: { code: -32601, message: 'Method not found' } });
+                    try { mcpLogger.warn('MCP 未知方法: %s id=%s', method, id); } catch {}
                 };
 
                 const parsed = parseMaybeNested(text);
@@ -139,7 +162,10 @@ function startConnecting(ctx?: Context) {
                 } else {
                     await handleOne(parsed);
                 }
-            } catch { /* 忽略非 JSON 消息 */ }
+            } catch { 
+                // 非 JSON 消息，才打印原始调试
+                logger.debug?.('上游消息：%s', text.slice(0, 2000));
+            }
         });
 
         ws.on('close', (code: number, reason: Buffer) => {

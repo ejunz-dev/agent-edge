@@ -11,6 +11,7 @@ export async function apply(pluginContext: Context) {
         host: '0.0.0.0',
         port: config.port,
         keys: [randomstring(16)],
+        enableSSE: true,
     } as any);
     pluginContext.inject(['server'], ({ server }) => {
         server.addServerLayer('stream', async (ctx, next) => {

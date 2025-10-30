@@ -40,6 +40,7 @@ function applyClient(ctx: Context) {
 }
 
 async function apply(ctx) {
+    (global as any).__cordis_ctx = ctx;
     if (process.argv.includes('--client')) {
         applyClient(ctx);
     } else {

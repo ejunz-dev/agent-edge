@@ -1,254 +1,182 @@
 import { Context } from 'cordis';
-import { BadRequestError, Handler } from '@ejunz/framework';
+import { BadRequestError, Handler, ConnectionHandler } from '@ejunz/framework';
+import { Server as MCPServer } from '@modelcontextprotocol/sdk/server/index.js';
+import {
+    CallToolRequestSchema,
+    ListToolsRequestSchema,
+    ListResourcesRequestSchema,
+    ReadResourceRequestSchema,
+} from '@modelcontextprotocol/sdk/types.js';
 import { Logger, randomstring } from '../utils';
 import { AuthHandler } from './misc';
 import { callTool, listTools } from '../mcp-tools';
 
 const logger = new Logger('handler/mcp');
 
-class MCPLogsHandler extends AuthHandler {
-    async get(params) {
-        const { limit = 100, level, tool, server } = params;
-        const query: any = {};
-        if (level) query.level = level;
-        if (tool) query.tool = tool;
-        if (server) query.server = server;
+// 全局 MCP Server（使用 SDK）
+const mcpServer = new MCPServer({
+    name: 'remote-mcp-server',
+    version: '1.0.0',
+});
 
-        const logs = await this.ctx.db.mcplog.find(query).sort({ timestamp: -1 }).limit(Number(limit));
-        this.response.body = { logs };
+function getMCPTools() {
+    // 将内部工具注册表转换为 MCP 规范：{ name, description, inputSchema }
+    const tools = listTools().map((t: any) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
+    }));
+    return tools;
+}
+
+// 注册工具列表
+mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: getMCPTools() }));
+
+// 注册工具调用
+mcpServer.setRequestHandler(CallToolRequestSchema, async (request: any) => {
+    const { name, arguments: args } = request.params || {};
+    const result = await callTool((global as any).__cordis_ctx || ({} as Context), { name, arguments: args || {} });
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+});
+
+// 注册资源列表（示例）
+mcpServer.setRequestHandler(ListResourcesRequestSchema, async () => ({
+    resources: [
+        { uri: 'file:///tmp/example.txt', name: '示例文件', description: '一个示例文本文件', mimeType: 'text/plain' },
+        { uri: '/mcp/api/info', name: '服务器信息', description: '服务器状态信息', mimeType: 'application/json' },
+    ],
+}));
+
+// 注册资源读取（示例）
+mcpServer.setRequestHandler(ReadResourceRequestSchema, async (request: any) => {
+    const { uri } = request.params || {};
+    if (uri === 'file:///tmp/example.txt') {
+        return { contents: [{ uri, mimeType: 'text/plain', text: '这是一个示例文件的内容。' }] };
+    }
+    if (uri === '/mcp/api/info') {
+        return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({
+            server: 'Remote MCP Server', version: '1.0.0', uptime: process.uptime(), timestamp: new Date().toISOString(),
+        }) }] };
+    }
+    throw new Error(`资源不存在: ${uri}`);
+});
+
+// 本地分发映射，避免直接访问 SDK 内部实现
+const sdkDispatchers: Record<string, (ctx: Context, req: any) => Promise<any>> = {
+    'tools/list': async () => ({ tools: getMCPTools() }),
+    'tools/call': async (ctx, request) => {
+        const { name, arguments: args } = request.params || {};
+        const result = await callTool(ctx, { name, arguments: args || {} });
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+    },
+    'resources/list': async () => ({
+        resources: [
+            { uri: 'file:///tmp/example.txt', name: '示例文件', description: '一个示例文本文件', mimeType: 'text/plain' },
+            { uri: '/mcp/api/info', name: '服务器信息', description: '服务器状态信息', mimeType: 'application/json' },
+        ],
+    }),
+    'resources/read': async (_ctx, request) => {
+        const { uri } = request.params || {};
+        if (uri === 'file:///tmp/example.txt') {
+            return { contents: [{ uri, mimeType: 'text/plain', text: '这是一个示例文件的内容。' }] };
+        }
+        if (uri === '/mcp/api/info') {
+            return { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({
+                server: 'Remote MCP Server', version: '1.0.0', uptime: process.uptime(), timestamp: new Date().toISOString(),
+            }) }] };
+        }
+        throw new Error(`资源不存在: ${uri}`);
+    },
+    'notifications/initialized': async () => ({}),
+};
+
+class MCPApiRootHandler extends Handler<Context> {
+    allowCors = true;
+
+    async get() {
+        try {
+            const payload = {
+                jsonrpc: '2.0',
+                result: {
+                    server: 'Remote MCP Server',
+                    version: '1.0.0',
+                    uptime: process.uptime(),
+                    timestamp: new Date().toISOString(),
+                },
+                id: null,
+            };
+            this.response.type = 'application/json';
+            this.response.body = payload;
+        } catch (e) {
+            this.response.type = 'application/json';
+            this.response.body = { jsonrpc: '2.0', error: { code: -32603, message: (e as Error).message }, id: null };
+        }
     }
 
     async post(params) {
-        const { level = 'info', message, tool, server, metadata } = params;
-        if (!message) throw new BadRequestError('Message is required');
-        
-        const log = await this.ctx.db.mcplog.insert({
-            timestamp: Date.now(),
-            level,
-            message,
-            tool,
-            metadata: metadata ? JSON.parse(metadata) : undefined,
-        });
+        const request = this.request.body;
+        const id = request?.id ?? null;
+        const method = request?.method;
 
-        logger.info(`[${level}] ${tool ? `[${tool}] ` : ''}${message}`);
-        
-        // 如果是工具调用日志，更新工具统计
-        if (tool) {
-            const toolDoc = await this.ctx.db.mcptool.findOne({ name: tool });
-            if (toolDoc) {
-                await this.ctx.db.mcptool.updateOne(
-                    { name: tool },
-                    {
-                        $set: {
-                            callCount: toolDoc.callCount + 1,
-                            lastCalled: Date.now(),
-                        },
-                    }
-                );
-                // 更新服务器统计
-                if (server) {
-                    const serverDoc = await this.ctx.db.mcpserver.findOne({ name: server });
-                    if (serverDoc) {
-                        await this.ctx.db.mcpserver.updateOne(
-                            { name: server },
-                            {
-                                $set: {
-                                    totalCalls: serverDoc.totalCalls + 1,
-                                    lastUpdate: Date.now(),
-                                },
-                            }
-                        );
-                        // 触发 metrics 事件
-                        await this.ctx.parallel('mcp/tool/call', server, tool);
-                    }
-                }
-            }
-        }
+        // 低层日志（请求）
+        try {
+            logger.info('[mcp/api] incoming', {
+                headers: this.request.headers,
+                method: this.request.method,
+                path: this.request.path,
+                body: request,
+            } as any);
+        } catch {}
 
-        this.response.body = { success: true, id: log._id };
-    }
-}
+        const reply = (data: any) => ({ jsonrpc: '2.0', id, ...data });
 
-class MCPServersHandler extends AuthHandler {
-    async get() {
-        const servers = await this.ctx.db.mcpserver.find({}).sort({ name: 1 });
-        this.response.body = { servers };
-    }
-
-    async postAdd(params) {
-        const { name, endpoint } = params;
-        if (!name || !endpoint) throw new BadRequestError('Name and endpoint are required');
-        
-        const existing = await this.ctx.db.mcpserver.findOne({ name });
-        if (existing) throw new BadRequestError('Server already exists');
-
-        await this.ctx.db.mcpserver.insert({
-            name,
-            endpoint,
-            status: 'online',
-            toolCount: 0,
-            totalCalls: 0,
-            lastUpdate: Date.now(),
-            createdAt: Date.now(),
-        });
-
-        this.response.body = { success: true };
-    }
-
-    async postUpdate(params) {
-        const { _id, name, endpoint, status } = params;
-        if (!_id) throw new BadRequestError('ID is required');
-        
-        const update: any = {};
-        if (name) update.name = name;
-        if (endpoint) update.endpoint = endpoint;
-        if (status) update.status = status;
-        update.lastUpdate = Date.now();
-
-        await this.ctx.db.mcpserver.updateOne({ _id }, { $set: update });
-        this.response.body = { success: true };
-    }
-
-    async postDelete(params) {
-        const { _id } = params;
-        if (!_id) throw new BadRequestError('ID is required');
-        
-        await this.ctx.db.mcpserver.removeOne({ _id }, {});
-        this.response.body = { success: true };
-    }
-
-    async postSync(params) {
-        const { name } = params;
-        if (!name) throw new BadRequestError('Server name is required');
-        
-        const server = await this.ctx.db.mcpserver.findOne({ name });
-        if (!server) throw new BadRequestError('Server not found');
-
-        // 这里应该调用 MCP 服务器的 list_tools 接口
-        // 暂时模拟数据
-        const mockTools = ['file_read', 'file_write', 'database_query', 'api_call'];
-        
-        for (const toolName of mockTools) {
-            const existing = await this.ctx.db.mcptool.findOne({ name: toolName, server: name });
-            if (!existing) {
-                await this.ctx.db.mcptool.insert({
-                    name: toolName,
-                    description: `Tool: ${toolName}`,
-                    server: name,
-                    callCount: 0,
-                    createdAt: Date.now(),
-                });
-            }
-        }
-
-        const tools = await this.ctx.db.mcptool.find({ server: name });
-        await this.ctx.db.mcpserver.updateOne(
-            { name },
-            {
-                $set: {
-                    toolCount: tools.length,
-                    lastUpdate: Date.now(),
-                    status: 'online',
+        if (method === 'initialize') {
+            this.response.type = 'application/json';
+            this.response.body = reply({
+                result: {
+                    protocolVersion: '2024-11-05',
+                    capabilities: { tools: {}, resources: {} },
+                    serverInfo: { name: 'remote-mcp-server', version: '1.0.0' },
                 },
-            }
-        );
-
-        this.response.body = { success: true, toolCount: tools.length };
-    }
-}
-
-class MCPToolsHandler extends AuthHandler {
-    async get(params) {
-        const { server, list } = params;
-        
-        // 如果请求列出可用的工具
-        if (list === 'true' || list === true) {
-            const availableTools = listTools();
-            this.response.body = { tools: availableTools, total: availableTools.length };
+            });
             return;
         }
-        
-        const query: any = {};
-        if (server) query.server = server;
-
-        const tools = await this.ctx.db.mcptool.find(query).sort({ callCount: -1, name: 1 });
-        this.response.body = { tools };
-    }
-
-    async postCall(params) {
-        const { tool, arguments: args, server } = params;
-        if (!tool) throw new BadRequestError('Tool name is required');
-        
-        logger.info(`Calling tool: ${tool}`);
-        
-        // 调用实际的工具处理器
         try {
-            const result = await callTool(this.ctx, { name: tool, arguments: args || {} });
-            
-            // 更新统计
-            const toolDoc = await this.ctx.db.mcptool.findOne({ name: tool });
-            if (toolDoc) {
-                await this.ctx.db.mcptool.updateOne(
-                    { name: tool },
-                    {
-                        $set: {
-                            callCount: toolDoc.callCount + 1,
-                            lastCalled: Date.now(),
-                        },
-                    }
-                );
+            if (sdkDispatchers[method]) {
+                const result = await sdkDispatchers[method](this.ctx, request);
+                // 记录并广播
+                try {
+                    const name = request?.params?.name;
+                    const args = request?.params?.arguments;
+                    const log = await this.ctx.db.mcplog.insert({
+                        timestamp: Date.now(),
+                        level: 'info',
+                        message: `Tool called: ${name}`,
+                        tool: name,
+                        metadata: { args },
+                    });
+                    try { await (this.ctx as any).emit('mcp/log', log); } catch {}
+                } catch {}
+                this.response.type = 'application/json';
+                this.response.body = reply({ result });
+                return;
             }
-
-            if (server) {
-                const serverDoc = await this.ctx.db.mcpserver.findOne({ name: server });
-                if (serverDoc) {
-                    await this.ctx.db.mcpserver.updateOne(
-                        { name: server },
-                        {
-                            $set: {
-                                totalCalls: serverDoc.totalCalls + 1,
-                                lastUpdate: Date.now(),
-                            },
-                        }
-                    );
-                }
-            }
-
-            // 记录调用日志
-            await this.ctx.db.mcplog.insert({
-                timestamp: Date.now(),
-                level: 'info',
-                message: `Tool called: ${tool}`,
-                tool,
-                metadata: { server, args },
-            });
-
-            // 触发 metrics 事件
-            if (server) {
-                await this.ctx.parallel('mcp/tool/call', server, tool);
-            }
-
-            this.response.body = { success: true, result };
-        } catch (error) {
-            logger.error(`Tool call failed: ${tool}`, error);
-            
-            // 记录错误日志
-            await this.ctx.db.mcplog.insert({
-                timestamp: Date.now(),
-                level: 'error',
-                message: `Tool call failed: ${tool} - ${error.message}`,
-                tool,
-                metadata: { server, args, error: error.message },
-            });
-            
-            throw new BadRequestError(`Tool call failed: ${error.message}`);
+        } catch (e) {
+            // 低层日志（错误）
+            try { logger.error('[mcp/api] error', e); } catch {}
+            this.response.type = 'application/json';
+            this.response.body = reply({ error: { code: -32603, message: (e as Error).message } });
+            return;
         }
+
+        this.response.type = 'application/json';
+        this.response.body = reply({ error: { code: -32601, message: 'Method not found' } });
     }
 }
 
+
 export async function apply(ctx: Context) {
-    ctx.Route('mcp_logs', '/mcp/logs', MCPLogsHandler);
-    ctx.Route('mcp_servers', '/mcp/servers', MCPServersHandler);
-    ctx.Route('mcp_tools', '/mcp/tools', MCPToolsHandler);
+    ctx.Route('mcp_api_root', '/mcp/api', MCPApiRootHandler);
+
 }
 

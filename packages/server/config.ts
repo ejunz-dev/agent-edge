@@ -2,8 +2,7 @@ import path from 'node:path';
 import Schema from 'schemastery';
 import { version as packageVersion } from './package.json';
 import {
-    checkReceiptPrinter,
-    fs, getPrinters, Logger, randomstring, yaml,
+    fs, Logger, randomstring, yaml,
 } from './utils';
 
 const logger = new Logger('init');
@@ -39,20 +38,8 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 # monitor:
 #   timeSync: false
 `;
-        let printers = [];
-        if (isClient) {
-            printers = (await getPrinters().catch(() => [])).map((p: any) => p.printer);
-            logger.info(printers.length, 'printers found:', JSON.stringify(printers));
-            await checkReceiptPrinter(await getPrinters(true));
-        }
         const clientConfigDefault = yaml.dump({
             server: '',
-            token: '',
-            balloon: '',
-            balloonLang: 'zh',
-            balloonType: 80,
-            printColor: false,
-            printers,
         });
         fs.writeFileSync(configPath, isClient ? clientConfigDefault : serverConfigDefault);
         logger.error('Config file generated, please fill in the config.yaml');
@@ -78,16 +65,6 @@ const serverSchema = Schema.object({
 }).description('Basic Config');
 const clientSchema = Schema.object({
     server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
-    balloon: Schema.string(),
-    balloonLang: Schema.union(['zh', 'en']).default('zh').required(),
-    balloonType: Schema.union([58, 80, 'plain']).default(80),
-    balloonCommand: Schema.string().default(''),
-    printColor: Schema.boolean().default(false),
-    printPageMax: Schema.number().default(5),
-    printMergeQueue: Schema.number().default(1),
-    printers: Schema.array(Schema.string()).default([]).description('printer id list, will disable printing if unset'),
-    token: Schema.string().required().description('Token generated on server'),
-    fonts: Schema.array(Schema.string()).default([]),
 });
 
 export const config = (isClient ? clientSchema : serverSchema)(yaml.load(fs.readFileSync(configPath, 'utf8')) as any);

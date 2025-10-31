@@ -32,13 +32,14 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/misc')),
             c.plugin(require('./handler/mcp')),
             c.plugin(require('./handler/edge')),
+            c.plugin(require('./handler/client')),
         ]);
         c.server.listen();
     });
 }
 
 function applyClient(ctx: Context) {
-    // Client functionality removed
+    ctx.plugin(require('./client/client'));
 }
 
 async function apply(ctx) {

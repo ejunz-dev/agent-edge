@@ -1,9 +1,12 @@
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
 import { config } from '../config';
+import { VoiceClient } from './voice';
 
 const logger = new Logger('client');
 
+// 全局语音客户端实例
+let globalVoiceClient: VoiceClient | null = null;
 
 function normalizeUpstreamFromHost(host: string): string {
     if (!host) return '';
@@ -75,6 +78,14 @@ function startConnecting(ctx?: Context) {
             retryDelay = 3000; // 重置退避
             connecting = false;
             try { ws.send('{"key":"ping"}'); } catch { /* ignore */ }
+            // 初始化语音客户端
+            globalVoiceClient = new VoiceClient({ ws });
+            globalVoiceClient.on('error', (err: Error) => {
+                logger.error('语音客户端错误: %s', err.message);
+            });
+            globalVoiceClient.on('response', (data: any) => {
+                logger.info('收到语音回复');
+            });
         });
 
         ws.on('message', async (data: any) => {
@@ -105,8 +116,14 @@ function startConnecting(ctx?: Context) {
 
     return () => {
         stopped = true;
+        globalVoiceClient = null;
         try { ws?.close?.(1000, 'shutdown'); } catch { /* ignore */ }
     };
+}
+
+// 导出语音客户端访问接口
+export function getVoiceClient(): VoiceClient | null {
+    return globalVoiceClient;
 }
 
 export async function apply(ctx: Context) {

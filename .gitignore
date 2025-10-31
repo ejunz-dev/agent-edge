@@ -42,3 +42,15 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Frontend build artifacts (Vite, Vue, etc.)
+.vite/
+vite.config.*.timestamp-*
+dist-ssr/
+coverage/
+.nyc_output/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+

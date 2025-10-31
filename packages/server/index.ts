@@ -25,14 +25,16 @@ try {
 async function applyServer(ctx: Context) {
     await Promise.all([
         ctx.plugin(require('./service/server')),
+        ctx.plugin(require('./service/voice')),
         ctx.plugin(require('./ejunz')),
     ]);
-    await ctx.inject(['server', 'dbservice'], async (c) => {
+    await ctx.inject(['server', 'dbservice', 'voice'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/misc')),
             c.plugin(require('./handler/mcp')),
             c.plugin(require('./handler/edge')),
             c.plugin(require('./handler/client')),
+            c.plugin(require('./handler/asr-proxy')),
         ]);
         c.server.listen();
     });

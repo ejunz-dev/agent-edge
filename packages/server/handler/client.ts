@@ -1,6 +1,7 @@
 import { ConnectionHandler, Handler } from '@ejunz/framework';
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
+import { config } from '../config';
 
 const logger = new Logger('edge2client');
 
@@ -22,13 +23,15 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
     private accepted = false;
 
     async prepare() {
-        // 单例：已有连接则拒绝新连接，避免抖动
-        if (ClientConnectionHandler.active.size > 0) {
+        // 允许多个客户端连接（移除单例限制以支持语音客户端等）
+        // 如果确实需要单例限制，可以通过配置控制
+        const allowMultiple = true; // 可以通过配置读取
+        if (!allowMultiple && ClientConnectionHandler.active.size > 0) {
             try { this.close(1000, 'edge singleton: connection already active'); } catch { /* ignore */ }
             return;
         }
         this.accepted = true;
-        logger.info('Edge client connected from %s', this.request.ip);
+        logger.info('Edge client connected from %s (active connections: %d)', this.request.ip, ClientConnectionHandler.active.size + 1);
         this.send({ hello: 'edge', version: 1 });
         ClientConnectionHandler.active.add(this);
         // 延迟到连接完全就绪（onmessage 已挂载）后再请求，避免竞态
@@ -98,6 +101,158 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                 }
                 this.subscriptions = rest;
                 this.send({ ok: 1, event });
+            }
+            break; }
+        case 'voice_chat': {
+            // 完整语音对话流程：接收音频或文本 -> AI -> TTS -> 返回音频
+            const { audio, text, format = 'wav', conversationHistory = [] } = msg;
+            
+            // 支持两种模式：1. 音频模式（需要ASR） 2. 文本模式（实时ASR已识别完成）
+            if (!audio && !text) {
+                this.send({ key: 'voice_chat', error: '缺少音频数据或文本数据' });
+                return;
+            }
+            
+            try {
+                // 使用this.ctx访问服务（ConnectionHandler继承的context）
+                const voiceService = (this.ctx as any).voice;
+                if (!voiceService) {
+                    this.send({ key: 'voice_chat', error: '语音服务未初始化' });
+                    return;
+                }
+                
+                let result: any;
+                
+                if (text) {
+                    // 文本模式：直接从AI对话开始（实时ASR已完成转录）
+                    logger.info('收到文本消息，直接进行AI对话: %s', text);
+                    const aiResponse = await voiceService.chat(text, conversationHistory);
+                    
+                    // 检查是否使用realtime TTS（支持流式播放）
+                    const voiceConfig = (config as any).voice || {};
+                    const ttsConfig = voiceConfig.tts || {};
+                    const model = ttsConfig.model || 'qwen3-tts-flash';
+                    
+                    if (model.includes('realtime')) {
+                        // 使用流式TTS：先发送初始消息，然后流式发送音频分片
+                        logger.info('使用流式TTS模式');
+                        
+                        // 先发送文本和AI回复
+                        this.send({
+                            key: 'voice_chat',
+                            result: {
+                                text: text,
+                                aiResponse: aiResponse,
+                                audio: null, // 音频将通过流式分片发送
+                                streaming: true, // 标识这是流式传输
+                            },
+                        });
+                        
+                        // 然后流式发送音频
+                        try {
+                            await (voiceService as any).streamTtsRealtime(
+                                aiResponse,
+                                { ...ttsConfig, voice: ttsConfig.voice || 'Cherry' },
+                                (audioChunk: Buffer) => {
+                                    // 每收到一个音频分片，立即发送给客户端
+                                    this.send({
+                                        key: 'voice_chat_audio',
+                                        chunk: audioChunk.toString('base64'),
+                                    });
+                                }
+                            );
+                            
+                            // 发送流式传输完成信号
+                            this.send({
+                                key: 'voice_chat_audio',
+                                done: true,
+                            });
+                        } catch (e: any) {
+                            logger.error('流式TTS失败，回退到非流式模式: %s', e.message);
+                            // 回退到非流式模式
+                            const audioBuffer = await voiceService.tts(aiResponse);
+                            this.send({
+                                key: 'voice_chat',
+                                result: {
+                                    text: text,
+                                    audio: audioBuffer.toString('base64'),
+                                    aiResponse: aiResponse,
+                                },
+                            });
+                        }
+                    } else {
+                        // 非流式TTS：等待完整音频后发送
+                        const audioBuffer = await voiceService.tts(aiResponse);
+                        
+                        result = {
+                            text: text,
+                            audio: audioBuffer.toString('base64'),
+                            aiResponse: aiResponse,
+                        };
+                        
+                        // 返回结果
+                        this.send({
+                            key: 'voice_chat',
+                            result: result,
+                        });
+                    }
+                } else {
+                    // 音频模式：ASR -> AI -> TTS
+                    const audioBuffer = Buffer.from(audio, 'base64');
+                    logger.info('收到语音消息，音频大小: %d bytes', audioBuffer.length);
+                    result = await voiceService.voiceChat(audioBuffer, format, conversationHistory);
+                    result.audio = result.audio.toString('base64');
+                    
+                    // 返回结果
+                    this.send({
+                        key: 'voice_chat',
+                        result: result,
+                    });
+                }
+            } catch (e: any) {
+                logger.error('语音对话处理失败: %s', e.message);
+                this.send({ key: 'voice_chat', error: e.message });
+            }
+            break; }
+        case 'voice_asr': {
+            // ASR: 语音转文字
+            const { audio, format = 'wav' } = msg;
+            if (!audio) {
+                this.send({ key: 'voice_asr', error: '缺少音频数据' });
+                return;
+            }
+            try {
+                const voiceService = (this.ctx as any).voice;
+                if (!voiceService) {
+                    this.send({ key: 'voice_asr', error: '语音服务未初始化' });
+                    return;
+                }
+                const audioBuffer = Buffer.from(audio, 'base64');
+                const text = await voiceService.asr(audioBuffer, format);
+                this.send({ key: 'voice_asr', result: { text } });
+            } catch (e: any) {
+                logger.error('ASR处理失败: %s', e.message);
+                this.send({ key: 'voice_asr', error: e.message });
+            }
+            break; }
+        case 'voice_tts': {
+            // TTS: 文字转语音
+            const { text, voice } = msg;
+            if (!text) {
+                this.send({ key: 'voice_tts', error: '缺少文本数据' });
+                return;
+            }
+            try {
+                const voiceService = (this.ctx as any).voice;
+                if (!voiceService) {
+                    this.send({ key: 'voice_tts', error: '语音服务未初始化' });
+                    return;
+                }
+                const audio = await voiceService.tts(text, voice);
+                this.send({ key: 'voice_tts', result: { audio: audio.toString('base64') } });
+            } catch (e: any) {
+                logger.error('TTS处理失败: %s', e.message);
+                this.send({ key: 'voice_tts', error: e.message });
             }
             break; }
         case 'ping':

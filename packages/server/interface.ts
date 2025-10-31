@@ -2,6 +2,7 @@ declare module 'cordis' {
     interface Context {
         params: any;
         fetcher: any;
+        voice: import('./service/voice').IVoiceService;
     }
     interface Events {
         'app/started': () => void

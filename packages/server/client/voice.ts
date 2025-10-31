@@ -15,11 +15,59 @@ try {
     // ws可能未安装，后续会报错
 }
 
+// 动态引入ffmpeg安装器，获取ffmpeg可执行文件路径
+let ffmpegPath: string | null = null;
+let ffprobePath: string | null = null;
+try {
+    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+    ffmpegPath = ffmpegInstaller.path;
+    logger.info('已加载通过 npm 安装的 ffmpeg: %s', ffmpegPath);
+} catch {
+    // @ffmpeg-installer/ffmpeg 可能未安装，将使用系统 PATH 中的 ffmpeg
+    logger.debug('未找到 @ffmpeg-installer/ffmpeg，将使用系统 PATH 中的 ffmpeg');
+}
+
+try {
+    const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
+    ffprobePath = ffprobeInstaller.path;
+    logger.info('已加载通过 npm 安装的 ffprobe: %s', ffprobePath);
+} catch {
+    // ffprobe 不是必须的，只是用来检测，不影响功能
+}
+
 export interface VoiceClientOptions {
     ws: any; // WebSocket connection
     audioFormat?: string; // 'wav', 'mp3', etc.
     sampleRate?: number;
     channels?: number;
+}
+
+/**
+ * 获取 ffmpeg 可执行文件路径
+ * 优先使用通过 npm 安装的版本，否则使用系统 PATH 中的版本
+ */
+function getFfmpegPath(): string {
+    if (ffmpegPath) {
+        return ffmpegPath;
+    }
+    return 'ffmpeg'; // fallback 到系统 PATH
+}
+
+/**
+ * 获取 ffplay 可执行文件路径
+ * ffplay 通常和 ffmpeg 在同一个目录
+ */
+function getFfplayPath(): string {
+    if (ffmpegPath) {
+        // ffplay 通常和 ffmpeg 在同一个目录
+        const ffmpegDir = path.dirname(ffmpegPath);
+        const ffplayPath = path.join(ffmpegDir, os.platform() === 'win32' ? 'ffplay.exe' : 'ffplay');
+        // 检查文件是否存在
+        if (fs.existsSync(ffplayPath)) {
+            return ffplayPath;
+        }
+    }
+    return 'ffplay'; // fallback 到系统 PATH
 }
 
 export class VoiceClient extends EventEmitter {
@@ -141,10 +189,46 @@ export class VoiceClient extends EventEmitter {
                         '-c', this.channels.toString(),
                         '-',
                     ];
+                } else if (platform === 'win32') {
+                    // Windows 使用 ffmpeg（通过 npm 安装或系统 PATH）
+                    command = getFfmpegPath();
+                    
+                    // 支持自定义设备，如果没有指定则尝试常见的设备名称
+                    // 用户可以通过环境变量 RECORDING_DEVICE 指定设备名称
+                    // 查看可用设备：ffmpeg -list_devices true -f dshow -i dummy
+                    let deviceName = 'audio="麦克风"'; // 中文系统默认
+                    const customDevice = process.env.RECORDING_DEVICE;
+                    if (customDevice) {
+                        // 如果用户已经提供了完整的格式，直接使用
+                        if (customDevice.includes('audio=')) {
+                            deviceName = customDevice;
+                        } else {
+                            // 否则添加 audio= 前缀
+                            deviceName = `audio=${customDevice}`;
+                        }
+                    }
+                    
+                    args = [
+                        '-f', 'dshow', // DirectShow 输入格式（Windows）
+                        '-i', deviceName,
+                        '-ar', this.sampleRate.toString(), // 采样率
+                        '-ac', this.channels.toString(), // 声道数
+                        '-acodec', 'pcm_s16le', // PCM 16-bit little-endian
+                        '-f', 'wav', // 输出格式
+                        '-', // 输出到 stdout
+                    ];
                 } else {
-                    // Windows 或其他平台
-                    reject(new Error(`不支持的平台: ${platform}，请安装录音工具`));
-                    return;
+                    // 其他平台尝试使用 ffmpeg（跨平台）
+                    command = getFfmpegPath();
+                    args = [
+                        '-f', 'alsa', // Linux 默认
+                        '-i', 'default',
+                        '-ar', this.sampleRate.toString(),
+                        '-ac', this.channels.toString(),
+                        '-acodec', 'pcm_s16le',
+                        '-f', 'wav',
+                        '-',
+                    ];
                 }
 
                 logger.info('开始录音...');
@@ -180,8 +264,19 @@ export class VoiceClient extends EventEmitter {
                 
                 this.recordingProcess.on('error', (err) => {
                     this.isRecording = false;
-                    logger.error('录音进程错误: %s', err.message);
-                    reject(err);
+                    const platform = os.platform();
+                    if (platform === 'win32' && (err.message.includes('spawn ffmpeg') || err.message.includes('ENOENT'))) {
+                        logger.error('录音失败: 未找到 ffmpeg 命令');
+                        logger.error('ffmpeg 将通过 npm 依赖自动安装，请运行: yarn install 或 npm install');
+                        logger.error('如果仍然失败，请手动安装 ffmpeg:');
+                        logger.error('1. 从 https://ffmpeg.org/download.html 下载 Windows 版本');
+                        logger.error('2. 解压后将 bin 目录添加到系统 PATH 环境变量');
+                        logger.error('3. 或使用 chocolatey: choco install ffmpeg');
+                        reject(new Error('未找到 ffmpeg，请运行 yarn install 安装依赖，或手动安装 ffmpeg'));
+                    } else {
+                        logger.error('录音进程错误: %s', err.message);
+                        reject(err);
+                    }
                 });
 
                 // 存储录音数据
@@ -214,8 +309,28 @@ export class VoiceClient extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             try {
-                // 停止录音进程
-                this.recordingProcess!.kill('SIGINT');
+                const platform = os.platform();
+                
+                // Windows 上使用 ffmpeg 时，需要通过 stdin 发送 'q' 来优雅停止
+                // 其他平台使用 SIGINT
+                if (platform === 'win32') {
+                    try {
+                        // 尝试优雅停止（发送 'q' 到 stdin）
+                        if (this.recordingProcess!.stdin && !this.recordingProcess!.stdin.destroyed) {
+                            this.recordingProcess!.stdin.write('q');
+                            this.recordingProcess!.stdin.end();
+                        } else {
+                            // 如果 stdin 不可用，直接 kill
+                            this.recordingProcess!.kill();
+                        }
+                    } catch (e) {
+                        // 如果写入失败，直接 kill
+                        this.recordingProcess!.kill();
+                    }
+                } else {
+                    // Linux/Mac 使用 SIGINT
+                    this.recordingProcess!.kill('SIGINT');
+                }
                 
                 this.recordingProcess!.on('close', () => {
                     try {
@@ -318,10 +433,26 @@ export class VoiceClient extends EventEmitter {
                 } else if (platform === 'darwin') {
                     command = 'afplay';
                     args = [tmpFile];
+                } else if (platform === 'win32') {
+                    // Windows: 优先使用 ffplay（支持更多格式），fallback 到 PowerShell
+                    // 首先尝试 ffplay
+                    command = getFfplayPath();
+                    args = [
+                        '-nodisp', // 不显示窗口
+                        '-autoexit', // 播放完自动退出
+                        '-loglevel', 'quiet', // 静默模式
+                        tmpFile
+                    ];
+                    // 如果 ffplay 不可用，将尝试 PowerShell（在 error 处理中）
                 } else {
-                    // Windows
-                    command = 'powershell';
-                    args = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                    // 其他平台尝试 ffplay
+                    command = getFfplayPath();
+                    args = [
+                        '-nodisp',
+                        '-autoexit',
+                        '-loglevel', 'quiet',
+                        tmpFile
+                    ];
                 }
 
                 const playProcess = spawn(command, args);
@@ -337,6 +468,39 @@ export class VoiceClient extends EventEmitter {
                 });
                 
                 playProcess.on('error', (err) => {
+                    // Windows 上如果 ffplay 失败，尝试使用 PowerShell
+                    if (platform === 'win32' && (command.includes('ffplay') || command.endsWith('ffplay.exe'))) {
+                        logger.warn('ffplay 不可用，尝试使用 PowerShell 播放');
+                        try {
+                            const psCommand = 'powershell';
+                            const psArgs = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                            const psProcess = spawn(psCommand, psArgs);
+                            
+                            psProcess.on('close', () => {
+                                try {
+                                    if (fs.existsSync(tmpFile)) {
+                                        fs.unlinkSync(tmpFile);
+                                    }
+                                } catch { /* ignore */ }
+                                resolve();
+                            });
+                            
+                            psProcess.on('error', (psErr) => {
+                                logger.error('PowerShell 播放也失败: %s', psErr.message);
+                                try {
+                                    if (fs.existsSync(tmpFile)) {
+                                        fs.unlinkSync(tmpFile);
+                                    }
+                                } catch { /* ignore */ }
+                                reject(new Error(`无法播放音频：ffplay 和 PowerShell 都不可用。请安装 ffmpeg 或确保 PowerShell 可用`));
+                            });
+                            
+                            return; // 不 reject，让 PowerShell 尝试
+                        } catch (fallbackErr) {
+                            // fallback 也失败
+                        }
+                    }
+                    
                     logger.error('播放失败: %s', err.message);
                     // 清理临时文件
                     try {
@@ -351,6 +515,40 @@ export class VoiceClient extends EventEmitter {
                 playProcess.stderr?.on('data', (data: Buffer) => {
                     const errorText = data.toString();
                     if (errorText.includes('command not found') || errorText.includes('not found')) {
+                        // Windows 上如果 ffplay 不存在，尝试 PowerShell
+                        if (platform === 'win32' && (command.includes('ffplay') || command.endsWith('ffplay.exe'))) {
+                            logger.warn('ffplay 命令不存在，尝试使用 PowerShell');
+                            playProcess.kill();
+                            
+                            try {
+                                const psCommand = 'powershell';
+                                const psArgs = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                                const psProcess = spawn(psCommand, psArgs);
+                                
+                                psProcess.on('close', () => {
+                                    try {
+                                        if (fs.existsSync(tmpFile)) {
+                                            fs.unlinkSync(tmpFile);
+                                        }
+                                    } catch { /* ignore */ }
+                                    resolve();
+                                });
+                                
+                                psProcess.on('error', (psErr) => {
+                                    logger.error('PowerShell 播放也失败: %s', psErr.message);
+                                    try {
+                                        if (fs.existsSync(tmpFile)) {
+                                            fs.unlinkSync(tmpFile);
+                                        }
+                                    } catch { /* ignore */ }
+                                    reject(new Error(`无法播放音频：ffplay 和 PowerShell 都不可用。请安装 ffmpeg 或确保 PowerShell 可用`));
+                                });
+                            } catch (fallbackErr) {
+                                reject(new Error(`播放命令不存在: ${command}，请安装 ffmpeg 或确保 PowerShell 可用`));
+                            }
+                            return;
+                        }
+                        
                         logger.error('播放命令不存在: %s', command);
                         playProcess.kill();
                         reject(new Error(`播放命令不存在: ${command}，请安装相应的播放工具`));
@@ -526,9 +724,45 @@ export class VoiceClient extends EventEmitter {
                 '-b', '16', // 16-bit
                 '-',
             ];
+        } else if (platform === 'win32') {
+            // Windows 使用 ffmpeg 进行实时录音
+            command = getFfmpegPath();
+            // 支持自定义设备，如果没有指定则尝试常见的设备名称
+            // 用户可以通过环境变量 RECORDING_DEVICE 指定设备名称
+            // 查看可用设备：ffmpeg -list_devices true -f dshow -i dummy
+            let deviceName = 'audio="麦克风"'; // 中文系统默认
+            const customDevice = process.env.RECORDING_DEVICE;
+            if (customDevice) {
+                // 如果用户已经提供了完整的格式，直接使用
+                if (customDevice.includes('audio=')) {
+                    deviceName = customDevice;
+                } else {
+                    // 否则添加 audio= 前缀
+                    deviceName = `audio=${customDevice}`;
+                }
+            }
+            
+            args = [
+                '-f', 'dshow', // DirectShow 输入格式
+                '-i', deviceName,
+                '-ar', this.sampleRate.toString(), // 采样率
+                '-ac', this.channels.toString(), // 声道数
+                '-acodec', 'pcm_s16le', // PCM 16-bit little-endian
+                '-f', 's16le', // 输出原始 PCM 格式
+                '-', // 输出到 stdout
+            ];
         } else {
-            logger.error(`不支持的平台: ${platform}`);
-            return;
+            // 其他平台尝试使用 ffmpeg
+            command = getFfmpegPath();
+            args = [
+                '-f', 'alsa',
+                '-i', 'default',
+                '-ar', this.sampleRate.toString(),
+                '-ac', this.channels.toString(),
+                '-acodec', 'pcm_s16le',
+                '-f', 's16le',
+                '-',
+            ];
         }
 
         logger.info('开始实时音频采集...');
@@ -551,9 +785,21 @@ export class VoiceClient extends EventEmitter {
         }
 
         this.recordingProcess.on('error', (err) => {
-            logger.error('录音进程错误: %s', err.message);
-            this.isRecording = false;
-            this.emit('error', err);
+            const platform = os.platform();
+            if (platform === 'win32' && (err.message.includes('spawn ffmpeg') || err.message.includes('ENOENT'))) {
+                logger.error('实时录音失败: 未找到 ffmpeg 命令');
+                logger.error('ffmpeg 将通过 npm 依赖自动安装，请运行: yarn install 或 npm install');
+                logger.error('如果仍然失败，请手动安装 ffmpeg:');
+                logger.error('1. 从 https://ffmpeg.org/download.html 下载 Windows 版本');
+                logger.error('2. 解压后将 bin 目录添加到系统 PATH 环境变量');
+                logger.error('3. 或使用 chocolatey: choco install ffmpeg');
+                this.isRecording = false;
+                this.emit('error', new Error('未找到 ffmpeg，请运行 yarn install 安装依赖，或手动安装 ffmpeg'));
+            } else {
+                logger.error('录音进程错误: %s', err.message);
+                this.isRecording = false;
+                this.emit('error', err);
+            }
         });
 
         this.recordingProcess.on('close', () => {
@@ -679,7 +925,22 @@ export class VoiceClient extends EventEmitter {
 
             // 停止录音进程
             if (this.recordingProcess) {
-                this.recordingProcess.kill('SIGINT');
+                const platform = os.platform();
+                // Windows 上使用 ffmpeg 时，需要通过 stdin 发送 'q' 来优雅停止
+                if (platform === 'win32') {
+                    try {
+                        if (this.recordingProcess.stdin && !this.recordingProcess.stdin.destroyed) {
+                            this.recordingProcess.stdin.write('q');
+                            this.recordingProcess.stdin.end();
+                        } else {
+                            this.recordingProcess.kill();
+                        }
+                    } catch (e) {
+                        this.recordingProcess.kill();
+                    }
+                } else {
+                    this.recordingProcess.kill('SIGINT');
+                }
                 this.recordingProcess = null;
             }
 

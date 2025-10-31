@@ -4,6 +4,9 @@
   "description": "Agent Edge",
   "main": "index.ts",
   "license": "AGPL-3.0",
+  "bin": {
+    "test-voice": "./client/test-voice.ts"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -16,6 +19,8 @@
     "@cordisjs/plugin-logger": "^1.0.1",
     "@cordisjs/plugin-timer": "^1.1.1",
     "@ejunz/framework": "0.4.4",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^1.4.0",
     "@freedom_sky/esc-pos-encoder": "^5.9.0",
     "@modelcontextprotocol/sdk": "^0.4.0",
     "@myriaddreamin/typst-ts-web-compiler": "0.6.1-rc2",

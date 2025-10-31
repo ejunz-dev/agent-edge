@@ -42,6 +42,20 @@ async function applyServer(ctx: Context) {
 
 function applyClient(ctx: Context) {
     ctx.plugin(require('./client/client'));
+    
+    // 在 client 模式下，启动 Electron（如果可用）
+    if (process.env.ELECTRON_DISABLE !== '1') {
+        try {
+            const { app } = require('electron');
+            // 延迟启动 Electron，等待后端初始化
+            setTimeout(() => {
+                require('./client/electron-main');
+            }, 1000);
+        } catch (e) {
+            // Electron 未安装或不可用，继续运行纯后端模式
+            logger.debug?.('Electron 不可用，以纯后端模式运行');
+        }
+    }
 }
 
 async function apply(ctx) {

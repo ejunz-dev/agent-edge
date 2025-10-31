@@ -86,6 +86,12 @@ function startConnecting(ctx?: Context) {
             globalVoiceClient.on('response', (data: any) => {
                 logger.info('收到语音回复');
             });
+            // 通知 Electron（如果正在运行）
+            if (typeof process.send === 'function') {
+                try {
+                    process.send({ type: 'voice-client-ready' });
+                } catch { /* ignore */ }
+            }
         });
 
         ws.on('message', async (data: any) => {

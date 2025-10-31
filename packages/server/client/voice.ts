@@ -79,6 +79,11 @@ export class VoiceClient extends EventEmitter {
     private isRecording = false;
     private conversationHistory: Array<{ role: string; content: string }> = [];
     
+    // 公开 getter 用于外部访问
+    public get recording(): boolean {
+        return this.isRecording;
+    }
+    
     // 实时ASR相关
     private realtimeAsrWs: any = null; // Qwen-ASR WebSocket连接
     private isRealtimeMode = false;

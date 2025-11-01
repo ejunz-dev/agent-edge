@@ -272,26 +272,21 @@ export class VoiceClient extends EventEmitter {
                                     }
                                     
                                     if (matchedHotkeys.length > 0) {
-                                        // 从匹配的动画中随机选择（至少选择2个，最多选择所有匹配的）
-                                        const count = Math.min(
-                                            Math.floor(Math.random() * 2) + 2, // 2或3个
-                                            matchedHotkeys.length
-                                        );
+                                        // 将10个动画全部打乱顺序播放（顺序随机）
                                         const shuffled = [...matchedHotkeys].sort(() => Math.random() - 0.5);
-                                        const animations = shuffled.slice(0, count).map(h => ({
+                                        const animations = shuffled.map(h => ({
                                             name: h.name,
-                                            duration: 2000,
+                                            duration: 3000, // 每个动画播放3秒
                                         }));
-                                        logger.info('🎲 从10个动画中随机选择: %s', animations.map(a => a.name).join(', '));
+                                        logger.info('🎲 10个动画顺序随机播放: %s', animations.map(a => a.name).join(', '));
                                         return animations;
                                     } else {
                                         logger.warn('⚠️ 未找到匹配10个动画的热键，从所有热键中随机选择');
                                         // 如果找不到匹配的，则从所有热键中随机选择（兼容性处理）
-                                        const count = Math.floor(Math.random() * 2) + 2;
                                         const shuffled = [...hotkeys].sort(() => Math.random() - 0.5);
-                                        const animations = shuffled.slice(0, count).map(h => ({
+                                        const animations = shuffled.map(h => ({
                                             name: h.name,
-                                            duration: 2000,
+                                            duration: 3000, // 每个动画播放3秒
                                         }));
                                         logger.info('🎲 随机选择动画序列: %s', animations.map(a => a.name).join(', '));
                                         return animations;

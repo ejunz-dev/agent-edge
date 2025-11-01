@@ -956,7 +956,7 @@ export class VTubeStudioClient {
                 return;
             }
             const animationName = firstAnimation.name;
-            const duration = firstAnimation.duration || 2000;
+            const duration = firstAnimation.duration || 3000;
             
             // 直接使用名称查找热键ID，不进行复杂匹配
             this.triggerHotkeyDirect(animationName);
@@ -974,7 +974,7 @@ export class VTubeStudioClient {
         }
 
         const animationName = currentAnimation.name;
-        const duration = currentAnimation.duration || 2000; // 默认2秒
+        const duration = currentAnimation.duration || 3000; // 默认3秒
 
         // 直接使用名称查找热键ID并触发，不进行复杂匹配
         this.triggerHotkeyDirect(animationName);

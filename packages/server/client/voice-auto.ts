@@ -140,11 +140,8 @@ let detectedDevices: string[] = [];
 let currentDeviceIndex = 0;
 let failedDevices: string[] = [];
 
-// VAD 相关状态
-let audioBuffer: Buffer[] = []; // 收集的音频数据（用于实时 ASR）
-let isCollecting = false; // 是否正在收集音频
-let lastSoundTime = 0; // 最后一次检测到声音的时间
-let recordingStartTime = 0; // 开始录音的时间（毫秒时间戳）
+// 流式传输状态（已移除音频收集模式）
+let isStreaming = false; // 是否正在流式传输音频
 
 // 实时 ASR 相关状态
 let realtimeAsrWs: any = null; // 实时 ASR WebSocket 连接
@@ -403,13 +400,7 @@ function handleRealtimeAsrMessage(data: any) {
             }
             logger.debug('[实时ASR] 连接完全就绪');
             
-            // 如果有缓存的音频数据且正在收集中，现在发送它们
-            if (audioBuffer.length > 0 && isCollecting) {
-                logger.debug('[实时ASR] 发送 %d 个缓存的音频块', audioBuffer.length);
-                for (const cachedChunk of audioBuffer) {
-                    sendAudioToRealtimeAsr(cachedChunk);
-                }
-            }
+            // 流式模式：音频已经在实时发送，不需要发送缓存
         }, 100);
         return;
     }
@@ -449,34 +440,9 @@ function handleRealtimeAsrMessage(data: any) {
             pendingTranscription = null;
         }
         
-        // 如果不在监听状态（按键已松开），检查是否是新的转录结果
-        // 如果是新结果（发送音频后收到的），可以自动发送
-        // 但如果是旧的转录结果（在发送新音频之前收到的），应该忽略
-        if (!isListening && finalText && finalText.trim()) {
-            // 检查是否正在等待新的转录（通过 pendingTranscription 或 isWaitingForTranscription 判断）
-            // 如果正在等待，说明这是新发送的音频的转录结果，可以自动发送
-            if (isWaitingForTranscription || pendingTranscription) {
-                logger.debug('[实时ASR] 检测到按键已松开，收到新转录结果，自动发送');
-                sendTextToServer(finalText.trim()).catch((err) => {
-                    logger.error('自动发送转录结果失败: %s', err.message);
-                });
-                // 清空转录文本和等待状态
-                currentTranscription = '';
-                isWaitingForTranscription = false;
-                if (pendingTranscription) {
-                    pendingTranscription(finalText.trim());
-                    pendingTranscription = null;
-                }
-            } else {
-                // 如果没有在等待新的转录，说明这可能是旧的转录结果，保存但不自动发送
-                // sendCollectedAudio 会检查并决定是否使用
-                logger.debug('[实时ASR] 收到转录结果，但未在等待新转录，保存供后续检查: %s', finalText.trim());
-                currentTranscription = finalText;
-            }
-        } else {
-            // 在监听状态，保存转录结果供后续使用
-            currentTranscription = finalText;
-        }
+        // server已经自动转发转录文本到AI API，client不需要处理
+        // 只更新currentTranscription用于显示
+        currentTranscription = finalText;
     }
     
     // 处理新的语音开始（speech_started）
@@ -774,6 +740,7 @@ async function startListening(): Promise<void> {
     }
     
     isListening = true;
+    isStreaming = true;
     
     // 确保录音设备已启动
     if (!isMonitoring || !recordingProcess) {
@@ -781,22 +748,18 @@ async function startListening(): Promise<void> {
         await startAutoVoiceMonitoring();
     }
     
-    // 清空之前的音频缓冲区和状态
-    audioBuffer = [];
-    currentTranscription = ''; // 清空之前的转录结果，确保使用新的结果
-    isCollecting = false;
-    lastSoundTime = 0;
-    recordingStartTime = 0;
-    isWaitingForTranscription = false; // 清空等待状态
-    pendingTranscription = null; // 清空待处理的回调
-    lastCompletedTime = 0; // 重置完成时间，避免被误判为刚完成的转录
+    // 清空之前的转录结果
+    currentTranscription = '';
     
     // 清除可能存在的部分数据
     if (recordingProcess && (recordingProcess as any)._partialChunk) {
         (recordingProcess as any)._partialChunk = Buffer.alloc(0);
     }
     
-    logger.info('🎤 开始录音（ASR连接已就绪）');
+    // 发送开始标志给server
+    notifyRecordingStarted();
+    
+    logger.info('🎤 开始流式录音');
 }
 
 /**
@@ -807,96 +770,65 @@ function stopListening(): void {
         return;
     }
     
+    // 立即停止流式传输
+    isStreaming = false;
+    
     logger.info('🔇 按键松开，等待剩余音频数据（300ms）...');
     
-    // 等待 300ms，让录音进程的缓冲区数据有时间到达
-    // 这样可以收集到完整的音频，避免只识别一半
+    // 等待 300ms，让剩余音频数据发送完成
     setTimeout(() => {
-        // 现在真正停止监听和收集
         isListening = false;
         
-        // 停止收集
-        isCollecting = false;
+        // 发送停止标志给server，强制commit
+        notifyRecordingCompleted();
         
-        // 取消任何待处理的转录等待（避免超时错误）
-        // 如果后面有 completed 事件，它会自动发送
-        if (pendingTranscription) {
-            // 如果有待处理的转录，先检查是否已有结果
-            if (currentTranscription && currentTranscription.trim()) {
-                const text = currentTranscription.trim();
-                pendingTranscription(text);
-                pendingTranscription = null;
-                currentTranscription = '';
-                logger.info('停止监听，使用已有转录结果: %s', text);
-                sendTextToServer(text).catch((err) => {
-                    logger.error('发送文本失败: %s', err.message);
-                });
-                // 清空音频缓冲区
-                audioBuffer = [];
-                logger.info('🔇 停止语音监听');
-                return;
-            } else {
-                // 取消待处理的转录（设置为空字符串，避免超时错误）
-                pendingTranscription('');
-                pendingTranscription = null;
-                logger.debug('停止监听，取消待处理的转录等待');
-            }
-        }
-        
-        // 检查是否已有待处理的转录结果（可能在 completed 事件中已经设置）
-        if (currentTranscription && currentTranscription.trim()) {
-            const text = currentTranscription.trim();
-            logger.info('停止监听，使用已有转录结果: %s', text);
-            currentTranscription = '';
-            sendTextToServer(text).catch((err) => {
-                logger.error('发送文本失败: %s', err.message);
-            });
-            // 清空音频缓冲区
-            audioBuffer = [];
-            logger.info('🔇 停止语音监听');
-            return;
-        }
-        
-        // 如果刚刚完成了一次转录（500ms内），不应该再发送新的音频
-        const timeSinceLastCompleted = Date.now() - lastCompletedTime;
-        if (timeSinceLastCompleted < 500) {
-            logger.debug('停止监听，刚刚完成转录，跳过发送新音频');
-            audioBuffer = [];
-            logger.info('🔇 停止语音监听');
-            return;
-        }
-        
-        // 如果没有转录结果，且没有音频数据，直接返回
-        if (audioBuffer.length === 0) {
-            logger.debug('停止监听，没有音频数据');
-            audioBuffer = [];
-            logger.info('🔇 停止语音监听');
-            return;
-        }
-        
-        // 如果正在等待转录，且没有新的音频数据，不应该重复发送
-        if (isWaitingForTranscription) {
-            logger.debug('停止监听，正在等待转录完成，跳过重复发送');
-            audioBuffer = [];
-            logger.info('🔇 停止语音监听');
-            return;
-        }
-        
-        // 如果有音频数据，一次性发送所有收集的音频进行ASR处理
-        if (audioBuffer.length > 0) {
-            logger.info('停止监听，发送已收集的音频（共 %d 个音频块，约 %.1f 秒）', 
-                audioBuffer.length, (audioBuffer.length * 0.1).toFixed(1));
-            sendCollectedAudio().catch((err) => {
-                logger.error('发送音频失败: %s', err.message);
-                // 发送失败时清空缓冲区
-                audioBuffer = [];
-            });
-        } else {
-            logger.info('停止监听，没有收集到音频数据');
-        }
-        
-        logger.info('🔇 停止语音监听');
-    }, 300); // 等待 300ms 让剩余数据到达
+        logger.info('🔇 停止流式录音');
+    }, 300);
+}
+
+/**
+ * 通知server录音已开始
+ */
+function notifyRecordingStarted() {
+    if (!realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+        logger.debug('[实时ASR] WebSocket未连接，无法通知录音开始');
+        return;
+    }
+    
+    const notification = {
+        type: 'recording.started',
+        timestamp: Date.now()
+    };
+    
+    try {
+        realtimeAsrWs.send(JSON.stringify(notification));
+        logger.debug('[实时ASR] 已通知server录音开始');
+    } catch (err: any) {
+        logger.error('[实时ASR] 通知录音开始失败: %s', err.message);
+    }
+}
+
+/**
+ * 通知server录音已完成，强制commit ASR识别
+ */
+function notifyRecordingCompleted() {
+    if (!realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+        logger.debug('[实时ASR] WebSocket未连接，无法通知录音完成');
+        return;
+    }
+    
+    // 发送录音完成通知，让server强制commit
+    const notification = {
+        type: 'recording.completed',
+        timestamp: Date.now()
+    };
+    
+    try {
+        realtimeAsrWs.send(JSON.stringify(notification));
+        logger.debug('[实时ASR] 已通知server录音完成，强制commit');
+    } catch (err: any) {
+        logger.error('[实时ASR] 通知录音完成失败: %s', err.message);
+    }
 }
 
 /**
@@ -943,11 +875,11 @@ async function sendTextToServer(text: string, isSystemMessage = false) {
  * 注意：音频已经在检测到声音时实时发送，这里只需要提交并等待转录
  */
 async function sendCollectedAudio() {
-    if (audioBuffer.length === 0) {
-        logger.debug('没有收集到音频数据');
-        return;
-    }
-
+    // 流式模式：音频已实时发送，此函数已废弃，不再执行任何操作
+    logger.debug('流式模式：sendCollectedAudio已废弃（音频已实时发送）');
+    return;
+    
+    /* 以下代码已废弃，流式模式下不再需要
     try {
         // 确保实时 ASR 连接已建立
         if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
@@ -1009,20 +941,8 @@ async function sendCollectedAudio() {
             }
         }
         
-        // 所有音频块发送完成后，立即检查是否有转录文本，有就立即使用，不管了
-        // 提交音频（如果需要）
-        if (!asrConfig?.enableServerVad) {
-            // Manual 模式，需要发送 commit 事件
-            const commitEvent = {
-                event_id: `event_${Date.now()}`,
-                type: 'input_audio_buffer.commit'
-            };
-            
-            if (realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
-                realtimeAsrWs.send(JSON.stringify(commitEvent));
-                logger.debug('[实时ASR] 发送 commit 事件');
-            }
-        }
+        // 所有音频块发送完成后，通知server录音结束，强制commit
+        notifyRecordingCompleted();
         
         // 立即检查是否有转录文本（可能在发送过程中已经收到了）
         if (currentTranscription && currentTranscription.trim()) {
@@ -1051,19 +971,37 @@ async function sendCollectedAudio() {
                     resolve();
                 }, timeout);
                 
-                // 如果已经收到转录结果，立即resolve
+                // 定期检查是否收到转录文本（每100ms检查一次）
                 const checkInterval = setInterval(() => {
+                    // 如果已经收到转录结果，立即resolve
                     if (transcriptionReceived || transcribedText) {
                         clearTimeout(timeoutId);
                         clearInterval(checkInterval);
                         resolve();
-                    } else if (!pendingTranscription) {
-                        // pendingTranscription 被清空了，检查结果
-                        if (transcribedText) {
-                            clearTimeout(timeoutId);
-                            clearInterval(checkInterval);
-                            resolve();
+                        return;
+                    }
+                    
+                    // 检查 currentTranscription 是否有更新（可能在等待期间收到了text事件）
+                    if (currentTranscription && currentTranscription.trim() && !transcriptionReceived) {
+                        transcribedText = currentTranscription.trim();
+                        transcriptionReceived = true;
+                        logger.info('[实时ASR] 等待期间收到转录文本，立即使用: %s', transcribedText);
+                        clearTimeout(timeoutId);
+                        clearInterval(checkInterval);
+                        if (pendingTranscription) {
+                            pendingTranscription(transcribedText);
+                            pendingTranscription = null;
                         }
+                        isWaitingForTranscription = false;
+                        resolve();
+                        return;
+                    }
+                    
+                    // pendingTranscription 被清空了，检查结果
+                    if (!pendingTranscription && transcribedText) {
+                        clearTimeout(timeoutId);
+                        clearInterval(checkInterval);
+                        resolve();
                     }
                 }, 100);
             });
@@ -1087,19 +1025,18 @@ async function sendCollectedAudio() {
         if (transcribedText && transcribedText.trim()) {
             const text = transcribedText.trim();
             logger.info('[实时ASR] 获得转录结果: %s', text);
-            // 发送转录文本到服务器进行对话
-            await sendTextToServer(text);
+            // server已经自动转发转录文本到AI API，client不需要再发送
+            // 只需要记录日志即可
         } else {
-            logger.warn('[实时ASR] 转录结果为空，跳过发送');
+            logger.warn('[实时ASR] 转录结果为空');
         }
 
     } catch (err: any) {
-        // 如果是超时错误，且已有转录文本，尝试使用它
-        if (err.message.includes('转录超时') && currentTranscription && currentTranscription.trim()) {
-            const text = currentTranscription.trim();
-            logger.info('[实时ASR] 转录超时，使用已有转录文本: %s', text);
-            currentTranscription = '';
-            await sendTextToServer(text);
+        // server已经自动处理转录文本，client不需要处理超时后的发送
+        // 只记录错误日志
+        const audioDuration = '0'; // 流式模式：不计算音频时长
+        if (audioDuration < '0.5') {
+            logger.warn('处理音频失败: %s（音频时长仅%s秒，可能过短无法识别）', err.message, audioDuration);
         } else {
             logger.error('处理音频失败: %s', err.message);
         }
@@ -1107,6 +1044,7 @@ async function sendCollectedAudio() {
         // 清空音频缓冲区
         audioBuffer = [];
     }
+    */
 }
 
 /**
@@ -1222,59 +1160,27 @@ async function startAutoVoiceMonitoring() {
     const chunkSize = 3200; // 约0.1秒的PCM16音频 (16000 * 2 * 0.1)
 
     recordingProcess.stdout?.on('data', (chunk: Buffer) => {
-        // 只在按键按下时才处理音频
-        // 注意：stopListening 会延迟 300ms 才设置 isListening = false
-        // 这样可以在按键松开后继续收集剩余数据
-        if (!isListening) {
+        // 流式传输模式：只在按键按下时实时发送音频块
+        if (!isListening || !isStreaming) {
             return; // 按键未按下或已停止，忽略音频
         }
         
-        // 如果 chunk 长度不够，可能是部分数据，需要累积
+        // 处理部分chunk（累积到完整块）
         if (chunk.length < chunkSize) {
-            // 如果已经有部分数据，累积起来
             if (!(recordingProcess as any)._partialChunk) {
                 (recordingProcess as any)._partialChunk = Buffer.alloc(0);
             }
             (recordingProcess as any)._partialChunk = Buffer.concat([(recordingProcess as any)._partialChunk, chunk]);
             chunk = (recordingProcess as any)._partialChunk;
             if (chunk.length < chunkSize) {
-                return; // 还不够一个完整块
+                return; // 还不够一个完整块，继续累积
             }
             (recordingProcess as any)._partialChunk = Buffer.alloc(0);
         }
         
         if (chunk.length >= chunkSize) {
-            const volume = calculateVolume(chunk);
-            const hasSoundDetected = hasSound(volume, SOUND_THRESHOLD);
-            const now = Date.now();
-
-            // 如果还没开始收集，立即开始收集（不等待检测到声音）
-            if (!isCollecting) {
-                // 按键按下后立即开始收集音频，无论是否有声音
-                isCollecting = true;
-                audioBuffer = [];
-                currentTranscription = '';
-                recordingStartTime = now;
-                lastSoundTime = hasSoundDetected ? now : 0;
-                if (hasSoundDetected) {
-                    logger.info('检测到声音，开始录音 - 音量: %.2f dB', volume);
-                } else {
-                    logger.info('开始录音（等待声音）');
-                }
-                // 收集这个音频块
-                audioBuffer.push(chunk);
-            } else {
-                // 已经开始收集，无论是否有声音都继续收集（直到按键松开）
-                if (hasSoundDetected) {
-                    lastSoundTime = now;
-                }
-                // 继续收集音频数据
-                audioBuffer.push(chunk);
-                // 每收集20个块记录一次（约2秒）
-                if (audioBuffer.length % 20 === 0) {
-                    logger.debug('收集音频块 [%d]，音量: %.2f dB', audioBuffer.length, volume);
-                }
-            }
+            // 流式发送：立即发送音频块到ASR服务器，不收集
+            sendAudioToRealtimeAsr(chunk);
         }
     });
 
@@ -1297,7 +1203,8 @@ async function startAutoVoiceMonitoring() {
         
         if (code !== 0) {
             // 如果还有未发送的音频，尝试发送
-            if (isCollecting && audioBuffer.length > 0) {
+            // 流式模式：不需要处理收集的音频
+            if (false) { // 已禁用
                 logger.info('进程异常退出，尝试发送已收集的音频');
                 sendCollectedAudio().catch((err) => {
                     logger.error('发送音频失败: %s', err.message);
@@ -1331,8 +1238,7 @@ function stopAutoVoiceMonitoring() {
         recordingProcess.kill();
         recordingProcess = null;
         isMonitoring = false;
-        isCollecting = false;
-        audioBuffer = [];
+        // 流式模式：不需要这些变量
     }
 }
 
@@ -1452,8 +1358,7 @@ export async function apply(ctx: Context) {
         // 清理状态
         isRealtimeAsrActive = false;
         isMonitoring = false;
-        isCollecting = false;
-        audioBuffer = [];
+        // 流式模式：不需要这些变量
         currentTranscription = '';
     };
     

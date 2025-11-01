@@ -21,6 +21,7 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
     private pending: Map<string, { resolve: Function, reject: Function, timer: NodeJS.Timeout } > = new Map();
     private subscriptions: Subscription[] = [];
     private accepted = false;
+    conversationHistory: Array<{ role: string; content: string }> = []; // 对话历史
 
     async prepare() {
         // 允许多个客户端连接（移除单例限制以支持语音客户端等）

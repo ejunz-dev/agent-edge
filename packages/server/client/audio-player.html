@@ -132,23 +132,36 @@
                 // 如果 AudioContext 已存在且未关闭，重用
                 if (audioContext && audioContext.state !== 'closed') {
                     console.log('[音频播放器] 复用现有 AudioContext，状态:', audioContext.state);
+                    // 如果重用的 AudioContext 是 suspended，确保按钮显示
+                    if (audioContext.state === 'suspended' && !audioEnabled) {
+                        const btn = document.getElementById('enableAudioBtn');
+                        if (btn) {
+                            btn.classList.remove('hidden');
+                        }
+                        updateStatus('已就绪（需要启用音频）', 'connected');
+                    }
                     return;
                 }
                 
                 audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
                 audioQueue = [];
                 isPlaying = false;
+                audioEnabled = false; // 重置启用状态，确保需要用户交互
                 console.log('[音频播放器] AudioContext 已创建，采样率:', audioContext.sampleRate, '状态:', audioContext.state);
-                updateStatus('已就绪', 'connected');
                 
-                // 如果 AudioContext 是 suspended 状态（浏览器要求用户交互），显示启用按钮
+                // 无论状态如何，都显示启用按钮（确保用户必须点击）
+                const btn = document.getElementById('enableAudioBtn');
+                if (btn) {
+                    btn.classList.remove('hidden');
+                }
+                
+                // 根据状态更新提示
                 if (audioContext.state === 'suspended') {
                     console.warn('[音频播放器] AudioContext 处于 suspended 状态，需要用户交互');
-                    const btn = document.getElementById('enableAudioBtn');
-                    if (btn) {
-                        btn.classList.remove('hidden');
-                    }
                     updateStatus('已就绪（需要启用音频）', 'connected');
+                } else {
+                    // 即使不是 suspended，也要求用户点击按钮以确保通过用户交互启用
+                    updateStatus('已就绪（请点击按钮启用音频）', 'connected');
                 }
             } catch (err) {
                 console.error('[音频播放器] 初始化音频失败:', err);
@@ -321,9 +334,10 @@
                 return;
             }
             
+            // 无论状态如何，都尝试恢复 AudioContext（确保音频真正启用）
             if (audioContext.state === 'suspended') {
                 audioContext.resume().then(() => {
-                    console.log('[音频播放器] AudioContext 已恢复');
+                    console.log('[音频播放器] AudioContext 已恢复，状态:', audioContext.state);
                     audioEnabled = true;
                     const btn = document.getElementById('enableAudioBtn');
                     if (btn) {
@@ -341,18 +355,32 @@
                     updateStatus('启用音频失败', '');
                 });
             } else {
-                audioEnabled = true;
-                const btn = document.getElementById('enableAudioBtn');
-                if (btn) {
-                    btn.classList.add('hidden');
-                }
-                updateStatus('已就绪', 'connected');
-                
-                // 如果队列中有数据，立即开始播放
-                if (audioQueue.length > 0 && !isPlaying) {
-                    console.log('[音频播放器] 队列中有数据，开始播放');
-                    startPlayback();
-                }
+                // 如果已经是 running 状态，也需要确保音频真正启用
+                // 尝试 resume 以确保（即使状态不是 suspended，resume 也不会报错）
+                audioContext.resume().then(() => {
+                    console.log('[音频播放器] AudioContext 已确认，状态:', audioContext.state);
+                    audioEnabled = true;
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.add('hidden');
+                    }
+                    updateStatus('已就绪', 'connected');
+                    
+                    // 如果队列中有数据，立即开始播放
+                    if (audioQueue.length > 0 && !isPlaying) {
+                        console.log('[音频播放器] 队列中有数据，开始播放');
+                        startPlayback();
+                    }
+                }).catch(err => {
+                    console.error('[音频播放器] 确认 AudioContext 失败:', err);
+                    // 即使失败，也尝试设置标志
+                    audioEnabled = true;
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.add('hidden');
+                    }
+                    updateStatus('已就绪', 'connected');
+                });
             }
         }
 

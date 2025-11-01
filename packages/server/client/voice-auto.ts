@@ -748,25 +748,40 @@ async function startListening(): Promise<void> {
         return;
     }
     
-    isListening = true;
-    
-    // 确保 ASR 连接已建立
+    // 检查 ASR 连接是否已建立（应该在启动时已建立）
     if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+        logger.warn('[实时ASR] 连接未就绪，尝试建立连接...');
         try {
             await connectRealtimeAsr();
+            logger.info('[实时ASR] 连接已建立');
         } catch (err: any) {
             logger.error('建立 ASR 连接失败: %s', err.message);
-            isListening = false;
+            logger.error('请确保 ASR 连接在启动时已建立');
             return;
         }
     }
     
-    // 清空之前的音频缓冲区
+    isListening = true;
+    
+    // 确保录音设备已启动
+    if (!isMonitoring || !recordingProcess) {
+        logger.info('准备录音设备...');
+        await startAutoVoiceMonitoring();
+    }
+    
+    // 清空之前的音频缓冲区和状态
     audioBuffer = [];
     currentTranscription = '';
     isCollecting = false;
+    lastSoundTime = 0;
+    recordingStartTime = 0;
     
-    logger.info('🎤 开始语音监听');
+    // 清除可能存在的部分数据
+    if (recordingProcess && (recordingProcess as any)._partialChunk) {
+        (recordingProcess as any)._partialChunk = Buffer.alloc(0);
+    }
+    
+    logger.info('🎤 开始录音（ASR连接已就绪）');
 }
 
 /**
@@ -846,13 +861,23 @@ function stopListening(): void {
         return;
     }
     
-    // 如果有音频数据但没有转录结果，发送并等待转录
-    logger.info('停止监听，发送已收集的音频');
-    sendCollectedAudio().catch((err) => {
-        logger.error('发送音频失败: %s', err.message);
-    });
+    // 如果正在收集音频，先停止收集
+    if (isCollecting) {
+        isCollecting = false;
+        logger.info('停止录音收集');
+    }
     
-    // 注意：不清空 audioBuffer，让 sendCollectedAudio 处理完后再清空
+    // 如果有音频数据，一次性发送所有收集的音频进行ASR处理
+    if (audioBuffer.length > 0) {
+        logger.info('停止监听，发送已收集的音频（共 %d 个音频块）', audioBuffer.length);
+        sendCollectedAudio().catch((err) => {
+            logger.error('发送音频失败: %s', err.message);
+            // 发送失败时清空缓冲区
+            audioBuffer = [];
+        });
+    } else {
+        logger.info('停止监听，没有收集到音频数据');
+    }
     
     logger.info('🔇 停止语音监听');
 }
@@ -909,25 +934,57 @@ async function sendCollectedAudio() {
     try {
         // 确保实时 ASR 连接已建立
         if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+            logger.info('[实时ASR] 连接未就绪，正在建立连接...');
             await connectRealtimeAsr();
-            // 如果连接是新建立的，需要重新发送已收集的音频块
-            logger.info('重新发送 %d 个音频块到实时 ASR', audioBuffer.length);
-            for (const chunk of audioBuffer) {
-                sendAudioToRealtimeAsr(chunk);
-            }
+            logger.info('[实时ASR] 连接已建立');
         }
 
-        // 提交并等待转录（音频已经在实时发送时发送过了）
-        // 但在 VAD 模式下，可能在调用 commitAndWaitTranscription 之前已经收到 completed 事件
-        // 如果已经有转录结果，直接使用它
+        // 模拟实时流式发送所有收集的音频块到实时 ASR
+        // 每个音频块约0.1秒，所以按实际时间间隔发送，让服务器VAD能正确检测
+        logger.info('[实时ASR] 流式发送 %d 个音频块到 ASR 服务器（总时长约 %.1f 秒）', 
+            audioBuffer.length, (audioBuffer.length * 0.1).toFixed(1));
+        
+        // 计算总音频数据大小
+        const totalSize = audioBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+        logger.debug('[实时ASR] 总音频数据大小: %d 字节（%d KB）', totalSize, Math.round(totalSize / 1024));
+        
+        // 模拟实时发送：每个音频块之间间隔约100ms（0.1秒），保持原始时间间隔
+        const chunkInterval = 100; // 每个块约0.1秒 = 100ms
+        for (let i = 0; i < audioBuffer.length; i++) {
+            const chunk = audioBuffer[i];
+            
+            // 使用setTimeout模拟实时发送时间间隔
+            await new Promise<void>((resolve) => {
+                setTimeout(() => {
+                    sendAudioToRealtimeAsr(chunk);
+                    resolve();
+                }, i * chunkInterval);
+            });
+            
+            // 每10个块记录一次进度
+            if ((i + 1) % 10 === 0 || i === audioBuffer.length - 1) {
+                logger.debug('[实时ASR] 已发送 %d/%d 个音频块', i + 1, audioBuffer.length);
+            }
+        }
+        
+        // 所有音频块发送完成后，等待一小段时间让服务器处理
+        // 在VAD模式下，给服务器一些时间进行VAD检测和转录
+        if (asrConfig?.enableServerVad) {
+            logger.debug('[实时ASR] 等待服务器VAD处理（500ms）...');
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        
+        // 提交并等待转录
+        logger.info('[实时ASR] 提交音频并等待转录结果...');
         let transcribedText: string;
+        
+        // 如果已经有转录结果（可能在发送过程中就收到了），直接使用
         if (currentTranscription && currentTranscription.trim()) {
-            // 已经有转录结果（可能是刚才收到的 completed 事件）
             transcribedText = currentTranscription.trim();
             currentTranscription = ''; // 清空，避免重复使用
-            logger.debug('[实时ASR] 使用已完成的转录结果: %s', transcribedText);
+            logger.info('[实时ASR] 使用已完成的转录结果: %s', transcribedText);
         } else {
-            // 等待新的转录结果
+            // 等待转录完成
             transcribedText = await commitAndWaitTranscription();
         }
         
@@ -943,16 +1000,15 @@ async function sendCollectedAudio() {
         // 如果是超时错误，且已有转录文本，尝试使用它
         if (err.message.includes('转录超时') && currentTranscription && currentTranscription.trim()) {
             const text = currentTranscription.trim();
-            logger.info('[实时ASR] 转录超时，但使用已有转录文本: %s', text);
+            logger.info('[实时ASR] 转录超时，使用已有转录文本: %s', text);
             currentTranscription = '';
             await sendTextToServer(text);
-            return;
+        } else {
+            logger.error('处理音频失败: %s', err.message);
         }
-        logger.error('处理音频失败: %s', err.message);
     } finally {
-        // 清空缓冲区
+        // 清空音频缓冲区
         audioBuffer = [];
-        // 注意：不清空 currentTranscription，因为它可能在 completed 事件中已经被使用或清空
     }
 }
 
@@ -1060,77 +1116,64 @@ async function startAutoVoiceMonitoring() {
         ];
     }
 
-    logger.info('开始语音监听服务（等待按键触发）...');
+    logger.info('准备录音设备（将在ASR连接就绪后启动）...');
     isMonitoring = true;
     
-    // 不预先建立 ASR 连接，等待按键触发时再建立
-    
+    // 启动录音设备进程
     recordingProcess = spawn(command, args);
 
     const chunkSize = 3200; // 约0.1秒的PCM16音频 (16000 * 2 * 0.1)
 
     recordingProcess.stdout?.on('data', (chunk: Buffer) => {
+        // 只在按键按下时才处理音频
+        if (!isListening) {
+            return; // 按键未按下，忽略音频
+        }
+        
+        // 如果 chunk 长度不够，可能是部分数据，需要累积
+        if (chunk.length < chunkSize) {
+            // 如果已经有部分数据，累积起来
+            if (!(recordingProcess as any)._partialChunk) {
+                (recordingProcess as any)._partialChunk = Buffer.alloc(0);
+            }
+            (recordingProcess as any)._partialChunk = Buffer.concat([(recordingProcess as any)._partialChunk, chunk]);
+            chunk = (recordingProcess as any)._partialChunk;
+            if (chunk.length < chunkSize) {
+                return; // 还不够一个完整块
+            }
+            (recordingProcess as any)._partialChunk = Buffer.alloc(0);
+        }
+        
         if (chunk.length >= chunkSize) {
             const volume = calculateVolume(chunk);
             const hasSoundDetected = hasSound(volume, SOUND_THRESHOLD);
             const now = Date.now();
 
-            if (hasSoundDetected) {
-                // 检测到声音
-                lastSoundTime = now;
-                
-                // 只在按键按下时才处理音频
-                if (!isListening) {
-                    return; // 按键未按下，忽略音频
-                }
-                
-                if (!isCollecting) {
-                    // 开始收集音频
-                    isCollecting = true;
-                    audioBuffer = [];
-                    currentTranscription = '';
-                    recordingStartTime = now;
+            // 如果还没开始收集，立即开始收集（不等待检测到声音）
+            if (!isCollecting) {
+                // 按键按下后立即开始收集音频，无论是否有声音
+                isCollecting = true;
+                audioBuffer = [];
+                currentTranscription = '';
+                recordingStartTime = now;
+                lastSoundTime = hasSoundDetected ? now : 0;
+                if (hasSoundDetected) {
                     logger.info('检测到声音，开始录音 - 音量: %.2f dB', volume);
-                    
-                    // 确保实时 ASR 连接已建立
-                    if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
-                        logger.debug('ASR 连接未就绪，尝试建立连接...');
-                        connectRealtimeAsr().catch((err) => {
-                            logger.error('建立实时 ASR 连接失败: %s', err.message);
-                        });
-                    }
-                }
-                
-                // 收集音频数据
-                audioBuffer.push(chunk);
-                
-                // 如果 ASR 连接已就绪，立即发送音频
-                if (isRealtimeAsrActive && realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
-                    sendAudioToRealtimeAsr(chunk);
                 } else {
-                    // 如果连接还未就绪，暂时缓存，等待连接建立后再发送
-                    logger.debug('ASR 连接未就绪，音频已缓存，等待连接建立...');
+                    logger.info('开始录音（等待声音）');
                 }
+                // 收集这个音频块
+                audioBuffer.push(chunk);
             } else {
-                // 没有声音
-                if (isCollecting) {
-                    // 正在收集中，检查是否超过静音超时
-                    const silenceTime = now - lastSoundTime;
-                    
-                    if (silenceTime >= SILENCE_TIMEOUT) {
-                        // 静音时间超过阈值，停止收集并发送
-                        // 计算录音时长：从开始收集到上次检测到声音的时间
-                        const recordingDuration = Math.max(0, lastSoundTime - recordingStartTime);
-                        logger.info('检测到静音，停止录音并发送 - 录音时长: %d ms', recordingDuration);
-                        isCollecting = false;
-                        // 直接发送，不再检查时长限制
-                        sendCollectedAudio().catch((err) => {
-                            logger.error('发送音频失败: %s', err.message);
-                        });
-                    } else {
-                        // 静音时间未超时，继续收集（可能只是短暂的停顿）
-                        audioBuffer.push(chunk);
-                    }
+                // 已经开始收集，无论是否有声音都继续收集（直到按键松开）
+                if (hasSoundDetected) {
+                    lastSoundTime = now;
+                }
+                // 继续收集音频数据
+                audioBuffer.push(chunk);
+                // 每收集20个块记录一次（约2秒）
+                if (audioBuffer.length % 20 === 0) {
+                    logger.debug('收集音频块 [%d]，音量: %.2f dB', audioBuffer.length, volume);
                 }
             }
         }
@@ -1241,20 +1284,22 @@ export async function apply(ctx: Context) {
                         logger.debug('检查 VTube Studio 状态失败，继续启动语音监听服务: %s', err.message);
                     }
                     
-                    logger.info('上游连接已建立，开始初始化语音监听服务...');
+                    logger.info('上游连接已建立，开始初始化...');
+                    
+                    // 预先建立 ASR 连接（不等待按键按下）
+                    try {
+                        logger.info('[实时ASR] 正在预先建立连接...');
+                        await connectRealtimeAsr();
+                        logger.info('[实时ASR] 连接已就绪（等待按键按下）');
+                    } catch (err: any) {
+                        logger.error('[实时ASR] 预先建立连接失败: %s', err.message);
+                        // 继续执行，但不影响后续操作
+                    }
                     
                     // 初始化键盘监听
                     initKeyboardListener();
                     
-                    // 延迟一小段时间确保连接稳定
-                    setTimeout(async () => {
-                        try {
-                            await startAutoVoiceMonitoring();
-                        } catch (err: any) {
-                            logger.error('启动自动语音监听失败: %s', err.message);
-                            hasStarted = false; // 允许重试
-                        }
-                    }, 1000);
+                    // 不在启动时立即启动录音设备，等待按键按下时在 startListening() 中启动
                 })();
             }
         }

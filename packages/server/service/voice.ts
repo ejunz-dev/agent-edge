@@ -500,7 +500,7 @@ class VoiceService extends Service implements IVoiceService {
         const baseUrl = 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime';
         const url = `${baseUrl}?model=${model}`;
 
-        this.logger.info(`[TTS Realtime Stream] 连接到: ${url.replace(apiKey, '***')}`);
+        this.logger.debug(`[TTS Realtime Stream] 连接到: ${url.replace(apiKey, '***')}`);
 
         const logger = this.logger; // 保存logger引用以便在闭包中使用
         
@@ -516,7 +516,7 @@ class VoiceService extends Service implements IVoiceService {
             });
 
             ws.on('open', () => {
-                logger.info('[TTS Realtime Stream] 连接已建立');
+                logger.debug('[TTS Realtime Stream] 连接已建立');
                 
                 // 发送session.update配置
                 const sessionUpdate = {
@@ -542,31 +542,34 @@ class VoiceService extends Service implements IVoiceService {
                     const textData = typeof data === 'string' ? data : data.toString('utf8');
                     const json = JSON.parse(textData);
                     
-                    logger.debug('[TTS Realtime Stream] 收到消息: %s', json.type);
+                    // 移除所有频繁的日志输出，减少噪音
+                    // logger.debug('[TTS Realtime Stream] 收到消息: %s', json.type);
 
                     if (json.type === 'session.created') {
                         sessionId = json.session?.id || null;
-                        logger.info('[TTS Realtime Stream] 会话已创建: %s', sessionId);
+                        // 会话创建日志改为debug，减少噪音
+                        // logger.debug('[TTS Realtime Stream] 会话已创建: %s', sessionId);
                     } else if (json.type === 'session.updated') {
-                        logger.info('[TTS Realtime Stream] 会话已更新');
+                        // logger.debug('[TTS Realtime Stream] 会话已更新');
                         // 开始发送文本
                         if (!isTextSent) {
                             isTextSent = true;
                             sendText();
                         }
                     } else if (json.type === 'response.created') {
-                        logger.info('[TTS Realtime Stream] 响应已创建，开始接收音频');
+                        // logger.debug('[TTS Realtime Stream] 响应已创建，开始接收音频');
                     } else if (json.type === 'response.audio.delta') {
                         // 接收音频分片，立即发送给客户端
                         if (json.delta) {
                             const audioChunk = Buffer.from(json.delta, 'base64');
-                            logger.debug('[TTS Realtime Stream] 收到音频分片: %d bytes，立即推送', audioChunk.length);
+                            // 完全移除频繁的音频分片日志
+                            // logger.debug('[TTS Realtime Stream] 收到音频分片: %d bytes，立即推送', audioChunk.length);
                             // 立即调用回调函数发送给客户端
                             onAudioChunk(audioChunk);
                         }
                     } else if (json.type === 'response.audio.done') {
                         // 音频生成完成
-                        logger.info('[TTS Realtime Stream] 音频生成完成');
+                        logger.debug('[TTS Realtime Stream] 音频生成完成');
                         
                         // 发送session.finish并关闭连接
                         const finishEvent = {
@@ -595,7 +598,7 @@ class VoiceService extends Service implements IVoiceService {
             });
 
             ws.on('close', (code: number, reason: Buffer) => {
-                logger.info(`[TTS Realtime Stream] 连接关闭: ${code} - ${reason?.toString() || ''}`);
+                logger.debug(`[TTS Realtime Stream] 连接关闭: ${code} - ${reason?.toString() || ''}`);
             });
 
             // 发送文本到缓冲区
@@ -611,7 +614,7 @@ class VoiceService extends Service implements IVoiceService {
                             type: 'input_text_buffer.commit'
                         };
                         ws.send(JSON.stringify(commitEvent));
-                        logger.info('[TTS Realtime Stream] 文本发送完成，发送commit');
+                        logger.debug('[TTS Realtime Stream] 文本发送完成，发送commit');
                         return;
                     }
 
@@ -700,7 +703,8 @@ class VoiceService extends Service implements IVoiceService {
                     const textData = typeof data === 'string' ? data : data.toString('utf8');
                     const json = JSON.parse(textData);
                     
-                    logger.debug('[TTS Realtime] 收到消息: %s', json.type);
+                    // 移除频繁的消息类型日志，减少噪音
+                    // logger.debug('[TTS Realtime] 收到消息: %s', json.type);
 
                     if (json.type === 'session.created') {
                         sessionId = json.session?.id || null;
@@ -720,7 +724,8 @@ class VoiceService extends Service implements IVoiceService {
                         if (json.delta) {
                             const audioChunk = Buffer.from(json.delta, 'base64');
                             audioChunks.push(audioChunk);
-                            logger.debug('[TTS Realtime] 收到音频分片: %d bytes', audioChunk.length);
+                            // 完全移除频繁的音频分片日志
+                            // logger.debug('[TTS Realtime] 收到音频分片: %d bytes', audioChunk.length);
                         }
                     } else if (json.type === 'response.audio.done') {
                         // 音频生成完成

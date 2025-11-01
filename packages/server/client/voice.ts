@@ -134,6 +134,34 @@ export class VoiceClient extends EventEmitter {
     private sampleRate: number;
     private channels: number;
     private recordingProcess: ChildProcess | null = null;
+    private static playbackCompleteCallbacks: Set<() => void> = new Set();
+    
+    /**
+     * 注册音频播放完成回调
+     */
+    static onPlaybackComplete(callback: () => void): void {
+        VoiceClient.playbackCompleteCallbacks.add(callback);
+    }
+    
+    /**
+     * 取消注册音频播放完成回调
+     */
+    static offPlaybackComplete(callback: () => void): void {
+        VoiceClient.playbackCompleteCallbacks.delete(callback);
+    }
+    
+    /**
+     * 通知所有注册的回调：音频播放完成
+     */
+    static notifyPlaybackComplete(): void {
+        VoiceClient.playbackCompleteCallbacks.forEach(callback => {
+            try {
+                callback();
+            } catch (err: any) {
+                logger.error('播放完成回调执行失败: %s', err.message);
+            }
+        });
+    }
     private isRecording = false;
     private conversationHistory: Array<{ role: string; content: string }> = [];
     
@@ -164,6 +192,15 @@ export class VoiceClient extends EventEmitter {
         this.audioFormat = options.audioFormat || 'wav';
         this.sampleRate = options.sampleRate || 16000;
         this.channels = options.channels || 1;
+
+        // 注册音频播放完成回调
+        const playbackCompleteCallback = () => {
+            this.handlePlaybackComplete();
+        };
+        VoiceClient.onPlaybackComplete(playbackCompleteCallback);
+        
+        // 保存回调引用，以便在销毁时取消注册
+        (this as any)._playbackCompleteCallback = playbackCompleteCallback;
 
         // 监听WebSocket消息
         if (this.ws && typeof this.ws.on === 'function') {
@@ -197,24 +234,68 @@ export class VoiceClient extends EventEmitter {
                         logger.info('🤖 AI: %s', aiResponse);
                     }
                     
-                    // 客户端随机选择动画序列（2-3个动画）
+                    // 客户端随机选择动画序列（从用户模型的10个动画中随机选择）
                     const selectRandomAnimations = async (): Promise<Array<{ name: string; duration: number }>> => {
                         try {
                             const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
                             const vtsClient = getVTubeStudioClient();
                             if (vtsClient && vtsClient.isConnected()) {
-                                logger.info('🎲 开始随机选择动画序列...');
+                                logger.info('🎲 开始随机选择动画序列（从10个动画中）...');
                                 const hotkeys = await vtsClient.getHotkeys();
                                 if (hotkeys && hotkeys.length > 0) {
-                                    // 随机选择2-3个热键
-                                    const count = Math.floor(Math.random() * 2) + 2; // 2或3个
-                                    const shuffled = [...hotkeys].sort(() => Math.random() - 0.5);
-                                    const animations = shuffled.slice(0, count).map(h => ({
-                                        name: h.name,
-                                        duration: 2000,
-                                    }));
-                                    logger.info('🎲 随机选择动画序列: %s', animations.map(a => a.name).join(', '));
-                                    return animations;
+                                    // 用户模型的10个动画关键词（用于匹配热键名称）
+                                    const targetAnimations = [
+                                        { keywords: ['开心', 'happy', '点头', 'nod'], id: 'happy_nod' },
+                                        { keywords: ['疑惑', 'confused'], id: 'confused' },
+                                        { keywords: ['摇头', 'shake', '晃脑'], id: 'shake_head_around' },
+                                        { keywords: ['害羞', '平静', 'shy'], id: 'shy' },
+                                        { keywords: ['发呆', '歪头', '思考', 'idle', 'tilt'], id: 'idle_tilt_head' },
+                                        { keywords: ['手舞足蹈', 'dance', '兴奋'], id: 'excited_dance' },
+                                        { keywords: ['眨眼', 'blink', '惊讶'], id: 'surprised_blink' },
+                                        { keywords: ['挥手', 'wave', '兴奋挥手'], id: 'excited_wave' },
+                                        { keywords: ['惊讶', 'surprised', '吃惊'], id: 'surprised' },
+                                        { keywords: ['难过', '悲伤', 'sad'], id: 'sad' },
+                                    ];
+                                    
+                                    // 从所有热键中找出匹配这10个动画的热键
+                                    const matchedHotkeys: Array<{ name: string; id: string }> = [];
+                                    for (const animation of targetAnimations) {
+                                        const matched = hotkeys.find(h => {
+                                            const nameLower = h.name.toLowerCase();
+                                            return animation.keywords.some(keyword => 
+                                                nameLower.includes(keyword.toLowerCase())
+                                            );
+                                        });
+                                        if (matched) {
+                                            matchedHotkeys.push({ name: matched.name, id: animation.id });
+                                        }
+                                    }
+                                    
+                                    if (matchedHotkeys.length > 0) {
+                                        // 从匹配的动画中随机选择（至少选择2个，最多选择所有匹配的）
+                                        const count = Math.min(
+                                            Math.floor(Math.random() * 2) + 2, // 2或3个
+                                            matchedHotkeys.length
+                                        );
+                                        const shuffled = [...matchedHotkeys].sort(() => Math.random() - 0.5);
+                                        const animations = shuffled.slice(0, count).map(h => ({
+                                            name: h.name,
+                                            duration: 2000,
+                                        }));
+                                        logger.info('🎲 从10个动画中随机选择: %s', animations.map(a => a.name).join(', '));
+                                        return animations;
+                                    } else {
+                                        logger.warn('⚠️ 未找到匹配10个动画的热键，从所有热键中随机选择');
+                                        // 如果找不到匹配的，则从所有热键中随机选择（兼容性处理）
+                                        const count = Math.floor(Math.random() * 2) + 2;
+                                        const shuffled = [...hotkeys].sort(() => Math.random() - 0.5);
+                                        const animations = shuffled.slice(0, count).map(h => ({
+                                            name: h.name,
+                                            duration: 2000,
+                                        }));
+                                        logger.info('🎲 随机选择动画序列: %s', animations.map(a => a.name).join(', '));
+                                        return animations;
+                                    }
                                 } else {
                                     logger.warn('⚠️ 没有可用热键，无法随机选择动画');
                                 }
@@ -281,18 +362,32 @@ export class VoiceClient extends EventEmitter {
                             this.emit('error', e);
                         });
                     } else if (streaming) {
-                        // 流式模式：先选择动画，然后初始化流式播放器
+                        // 流式模式：立即初始化流式播放器（不等待动画选择）
+                        // 这样可以确保音频数据到达时能立即播放
+                        this.initStreamingPlayback();
+                        
+                        // 异步选择动画（不阻塞音频播放）
                         selectRandomAnimations().then((animations) => {
                             if (animations.length > 0) {
                                 (this as any).pendingAnimations = animations;
-                                logger.info('🎬 流式模式：准备初始化播放，pendingAnimations: %s', animations.map(a => a.name).join(', '));
+                                logger.info('🎬 流式模式：动画序列已选择: %s', animations.map(a => a.name).join(', '));
+                                
+                                // 如果播放器已经初始化，立即启动动画
+                                try {
+                                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                    const vtsClient = getVTubeStudioClient();
+                                    if (vtsClient && vtsClient.isConnected()) {
+                                        logger.info('🎬 流式模式：开始持续触发动画序列: %s', animations.map(a => a.name).join(', '));
+                                        vtsClient.startContinuousAnimation(animations);
+                                    }
+                                } catch (err: any) {
+                                    logger.error('启动动画序列失败: %s', err.message);
+                                }
                             } else {
                                 logger.warn('⚠️ 流式模式：没有选择到动画');
                             }
-                            this.initStreamingPlayback();
                         }).catch((err) => {
-                            logger.error('流式模式：选择动画失败，继续播放: %s', err.message);
-                            this.initStreamingPlayback();
+                            logger.error('流式模式：选择动画失败: %s', err.message);
                         });
                     }
                     
@@ -1237,23 +1332,15 @@ export class VoiceClient extends EventEmitter {
             const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
             const vtsClient = getVTubeStudioClient();
             if (vtsClient && vtsClient.isConnected()) {
-                logger.info('🎬 initStreamingPlayback: VTube Studio 已连接，检查 pendingAnimations');
+                logger.info('🎬 initStreamingPlayback: VTube Studio 已连接');
                 // 设置说话状态（用于嘴型同步）
                 if (audioSync.enabled === true) {
                     vtsClient.setParameter('Speaking', 1.0);
                     logger.debug('已通知 VTube Studio 开始说话');
                 }
                 
-                // 如果有待播放的动画序列，开始持续触发
-                if ((this as any).pendingAnimations && Array.isArray((this as any).pendingAnimations) && (this as any).pendingAnimations.length > 0) {
-                    const animNames = (this as any).pendingAnimations.map((a: any) => a.name).join(', ');
-                    logger.info('🎬 流式模式：开始持续触发动画序列: %s', animNames);
-                    vtsClient.startContinuousAnimation((this as any).pendingAnimations);
-                    (this as any).pendingAnimations = null; // 清除
-                } else {
-                    logger.warn('⚠️ initStreamingPlayback: pendingAnimations 为空或无效，无法启动动画');
-                    logger.debug('pendingAnimations 值: %s', JSON.stringify((this as any).pendingAnimations));
-                }
+                // 注意：动画会在后面异步启动（在 selectRandomAnimations 完成后）
+                // 这里不再处理 pendingAnimations，避免阻塞音频播放初始化
             }
         } catch (err: any) {
             logger.debug('设置 VTube Studio 说话状态失败: %s', err.message);
@@ -1506,6 +1593,40 @@ export class VoiceClient extends EventEmitter {
      * 完成流式播放
      */
     private finalizeStreamingPlayback(): void {
+        // 只使用 Web 音频播放器，发送完成信号（通知前端数据已发送完成）
+        // 但不停止动画，等待前端播放器真正播放完成后再停止
+        if (this.useWebAudioPlayer) {
+            try {
+                const { sendPlaybackDone } = require('./audio-player-server');
+                if (sendPlaybackDone) {
+                    sendPlaybackDone();
+                }
+                logger.debug('已发送音频数据完成信号，等待前端播放完成后再停止动画');
+            } catch (err: any) {
+                logger.debug('发送播放完成信号失败: %s', err.message);
+            }
+            // 不立即清理，等待前端播放完成通知
+            return;
+        }
+        
+        // Web 播放器未连接，立即停止动画和清理状态
+        logger.debug('Web 音频播放器未连接，立即停止动画');
+        this.stopAnimationAndCleanup();
+    }
+
+    /**
+     * 处理音频播放完成（由 audio-player-server 通知）
+     */
+    private handlePlaybackComplete(): void {
+        if (this.useWebAudioPlayer || this.isStreamingAudio) {
+            this.stopAnimationAndCleanup();
+        }
+    }
+    
+    /**
+     * 停止动画并清理资源（在音频真正播放完成时调用）
+     */
+    private stopAnimationAndCleanup(): void {
         // 通知 VTube Studio 停止说话并停止动画
         try {
             const config = require('../config').config as any;
@@ -1518,6 +1639,7 @@ export class VoiceClient extends EventEmitter {
             if (vtsClient && vtsClient.isConnected()) {
                 // 停止持续触发动画
                 vtsClient.stopContinuousAnimation();
+                logger.info('🎬 音频播放完成，已停止动画序列');
                 
                 // 设置说话状态为 0，并重置音量参数
                 if (audioSync.enabled === true) {
@@ -1531,22 +1653,7 @@ export class VoiceClient extends EventEmitter {
             logger.debug('重置 VTube Studio 说话状态失败: %s', err.message);
         }
 
-        // 只使用 Web 音频播放器，发送完成信号
-        if (this.useWebAudioPlayer) {
-            try {
-                const { sendPlaybackDone } = require('./audio-player-server');
-                if (sendPlaybackDone) {
-                    sendPlaybackDone();
-                }
-            } catch (err: any) {
-                logger.debug('发送播放完成信号失败: %s', err.message);
-            }
-            this.useWebAudioPlayer = false;
-            return;
-        }
-        
-        // Web 播放器未连接，只记录调试信息，清理状态
-        logger.debug('Web 音频播放器未连接，播放完成');
+        // 清理流式音频资源
         this.cleanupStreamingAudio();
     }
 
@@ -1554,16 +1661,8 @@ export class VoiceClient extends EventEmitter {
      * 清理流式音频资源
      */
     private cleanupStreamingAudio(): void {
-        // 停止动画（如果还在播放）
-        try {
-            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
-            const vtsClient = getVTubeStudioClient();
-            if (vtsClient && vtsClient.isConnected()) {
-                vtsClient.stopContinuousAnimation();
-            }
-        } catch (err: any) {
-            // 忽略错误
-        }
+        // 注意：动画停止应该在 stopAnimationAndCleanup() 中处理
+        // 这里只清理资源，不再重复停止动画
         // 清除启动定时器
         if (this.streamingPlaybackTimer) {
             clearTimeout(this.streamingPlaybackTimer);

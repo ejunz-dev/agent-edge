@@ -88,7 +88,8 @@ export async function qwenTtsRealtime(text: string, ttsConfig: any): Promise<Buf
                     if (json.delta) {
                         const audioChunk = Buffer.from(json.delta, 'base64');
                         audioChunks.push(audioChunk);
-                        logger.debug('[TTS Realtime] 收到音频分片: %d bytes', audioChunk.length);
+                        // 移除频繁的音频分片日志，减少噪音
+                        // logger.debug('[TTS Realtime] 收到音频分片: %d bytes', audioChunk.length);
                     }
                 } else if (json.type === 'response.audio.done') {
                     // 音频生成完成

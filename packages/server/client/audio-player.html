@@ -306,7 +306,32 @@
                 source.connect(audioContext.destination);
 
                 source.onended = () => {
-                    setTimeout(playNext, 0);
+                    // 当前分片播放完成，检查是否所有音频都已播放完成
+                    setTimeout(() => {
+                        // 检查是否所有音频都已播放完成（队列为空且数据已发送完成）
+                        const dataSentComplete = typeof window !== 'undefined' && window.audioDataSentComplete === true;
+                        if (audioQueue.length === 0 && dataSentComplete && isPlaying) {
+                            // 队列为空且数据已发送完成，这是最后一个分片
+                            isPlaying = false;
+                            console.log('[音频播放器] 所有音频分片播放完成');
+                            // 通知后端播放完成
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                try {
+                                    ws.send(JSON.stringify({ type: 'playback_complete' }));
+                                    console.log('[音频播放器] 已通知后端播放完成');
+                                    // 重置标志
+                                    if (typeof window !== 'undefined') {
+                                        window.audioDataSentComplete = false;
+                                    }
+                                } catch (err) {
+                                    console.error('[音频播放器] 发送播放完成通知失败:', err);
+                                }
+                            }
+                            // 不再调用 playNext，因为播放已完成
+                            return;
+                        }
+                        playNext();
+                    }, 0);
                 };
 
                 source.onerror = (err) => {
@@ -388,9 +413,19 @@
         function finalizePlayback() {
             updateStatus('播放完成', 'connected');
             
-            // 等待队列清空
+            // 等待队列清空且当前播放完成
             const checkQueue = setInterval(() => {
-                if (audioQueue.length === 0 && isPlaying) {
+                if (audioQueue.length === 0 && !isPlaying) {
+                    // 所有音频已播放完成，通知后端
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        try {
+                            ws.send(JSON.stringify({ type: 'playback_complete' }));
+                            console.log('[音频播放器] 已通知后端播放完成');
+                        } catch (err) {
+                            console.error('[音频播放器] 发送播放完成通知失败:', err);
+                        }
+                    }
+                    
                     setTimeout(() => {
                         if (audioContext) {
                             audioContext.close().catch(() => {});
@@ -404,11 +439,18 @@
                         initAudio(); // 重新初始化，准备下一次播放
                     }, 500);
                     clearInterval(checkQueue);
+                } else if (audioQueue.length === 0 && isPlaying) {
+                    // 队列已空，但可能还有正在播放的分片，继续等待
+                    // 不发送通知，等待当前分片播放完成
                 }
             }, 100);
         }
 
         // 连接 WebSocket
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 10; // 最大重连次数
+        let reconnectTimer = null;
+        
         function connectWebSocket() {
             // client 模式下使用当前页面的 WebSocket（同源）
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -417,11 +459,28 @@
             
             updateStatus('正在连接...', '');
             
+            // 如果已有连接，先关闭
+            if (ws && ws.readyState !== WebSocket.CLOSED) {
+                try {
+                    ws.close();
+                } catch (e) {
+                    // 忽略错误
+                }
+            }
+            
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {
                 console.log('[音频播放器] WebSocket 已连接');
                 updateStatus('已连接', 'connected');
+                reconnectAttempts = 0; // 重置重连计数
+                
+                // 清除重连定时器
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                
                 initAudio();
                 
                 // 发送就绪消息
@@ -444,8 +503,12 @@
                             console.warn('[音频播放器] 音频分片为空');
                         }
                     } else if (data.type === 'done') {
-                        console.log('[音频播放器] 收到播放完成信号');
-                        finalizePlayback();
+                        console.log('[音频播放器] 收到数据发送完成信号，等待队列播放完成');
+                        // 设置标志，表示音频数据已全部发送完成
+                        // 当队列为空且当前分片播放完成时，会发送 playback_complete
+                        if (typeof window !== 'undefined') {
+                            window.audioDataSentComplete = true;
+                        }
                     } else {
                         console.log('[音频播放器] 未知消息类型:', data.type);
                     }
@@ -461,8 +524,21 @@
 
             ws.onclose = () => {
                 console.log('[音频播放器] WebSocket 已断开');
-                updateStatus('已断开，正在重连...', '');
-                setTimeout(connectWebSocket, 3000);
+                
+                // 如果未超过最大重连次数，尝试重连
+                if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * reconnectAttempts, 10000); // 递增延迟，最多10秒
+                    updateStatus(`已断开，${delay/1000}秒后重连 (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, '');
+                    console.log(`[音频播放器] ${delay/1000}秒后尝试第 ${reconnectAttempts} 次重连...`);
+                    
+                    reconnectTimer = setTimeout(() => {
+                        connectWebSocket();
+                    }, delay);
+                } else {
+                    updateStatus('连接失败，请刷新页面', '');
+                    console.error('[音频播放器] 已达到最大重连次数，停止重连');
+                }
             };
         }
 

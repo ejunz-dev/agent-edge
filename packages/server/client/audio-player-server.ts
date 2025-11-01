@@ -21,6 +21,8 @@ let httpServer: http.Server | null = null;
 let wss: any = null; // WebSocket.Server
 let clientWs: any = null; // 前端播放器的 WebSocket 连接
 const CLIENT_PORT = 5284; // client 模式使用的端口（避免与 server 模式冲突）
+let hasAttemptedOpenBrowser = false; // 是否已尝试打开浏览器
+let connectionCheckTimer: NodeJS.Timeout | null = null; // 连接检查定时器
 
 /**
  * 启动本地音频播放器服务器
@@ -67,13 +69,30 @@ function startAudioPlayerServer(): void {
     wss.on('connection', (ws: any, req: any) => {
         logger.info('前端音频播放器已连接: %s', req.url);
         clientWs = ws;
+        
+        // 清除连接检查定时器（已连接，不需要再检查）
+        if (connectionCheckTimer) {
+            clearTimeout(connectionCheckTimer);
+            connectionCheckTimer = null;
+        }
+        hasAttemptedOpenBrowser = true; // 标记已连接，不需要再打开浏览器
 
         ws.on('message', (data) => {
             // 可以处理前端发送的消息（如果需要）
             try {
                 const msg = JSON.parse(data.toString());
                 if (msg.type === 'ready') {
-                    logger.debug('前端播放器已就绪');
+                    logger.info('前端播放器已就绪');
+                } else if (msg.type === 'playback_complete') {
+                    // 前端播放器通知音频真正播放完成
+                    logger.debug('前端播放器通知：音频播放已完成');
+                    // 通知 voice.ts 停止动画
+                    try {
+                        const { VoiceClient } = require('./voice');
+                        VoiceClient.notifyPlaybackComplete();
+                    } catch (err: any) {
+                        logger.debug('通知播放完成失败: %s', err.message);
+                    }
                 }
             } catch {
                 // 忽略非 JSON 消息
@@ -81,10 +100,19 @@ function startAudioPlayerServer(): void {
         });
 
         ws.on('close', () => {
-            logger.info('前端音频播放器已断开');
+            logger.warn('前端音频播放器已断开，等待重连...');
             if (clientWs === ws) {
                 clientWs = null;
             }
+            
+            // 断连后，尝试重新打开浏览器（如果页面被关闭）
+            // 等待3秒，看是否会自动重连（页面可能还在，只是暂时断开）
+            connectionCheckTimer = setTimeout(() => {
+                if (!clientWs || !isPlayerConnected()) {
+                    logger.info('检测到播放器未重连，尝试重新打开播放器页面...');
+                    openBrowserPage();
+                }
+            }, 3000);
         });
 
         ws.on('error', (err: Error) => {
@@ -99,22 +127,18 @@ function startAudioPlayerServer(): void {
     httpServer.listen(CLIENT_PORT, '127.0.0.1', () => {
         logger.info('音频播放器服务器已启动: http://localhost:%d/audio-player', CLIENT_PORT);
         
-        // 自动打开浏览器
-        const url = `http://localhost:${CLIENT_PORT}/audio-player`;
+        // 先等待一小段时间，检查是否有已打开的播放器页面自动连接
         setTimeout(() => {
-            try {
-                const platform = os.platform();
-                if (platform === 'win32') {
-                    spawn('cmd', ['/c', 'start', url], { stdio: 'ignore' });
-                } else if (platform === 'darwin') {
-                    spawn('open', [url], { stdio: 'ignore' });
-                } else {
-                    spawn('xdg-open', [url], { stdio: 'ignore' });
-                }
-            } catch {
-                // 忽略错误
+            if (isPlayerConnected()) {
+                logger.info('检测到已打开的播放器页面已连接，无需打开新窗口');
+                hasAttemptedOpenBrowser = true;
+                return;
             }
-        }, 1000);
+            
+            // 如果没有连接，尝试打开浏览器
+            logger.info('未检测到已连接的播放器，尝试打开播放器页面...');
+            openBrowserPage();
+        }, 2000); // 等待2秒，给已打开的页面时间连接
     });
 
     httpServer.on('error', (err: Error) => {
@@ -216,15 +240,58 @@ export function isPlayerConnected(): boolean {
 }
 
 /**
+ * 打开浏览器页面（辅助函数）
+ */
+function openBrowserPage(): void {
+    if (hasAttemptedOpenBrowser) {
+        // 已经尝试过打开，可能是用户关闭了页面，允许再次打开
+        logger.debug('重新打开播放器页面...');
+    }
+    
+    const url = `http://localhost:${CLIENT_PORT}/audio-player`;
+    try {
+        const platform = os.platform();
+        if (platform === 'win32') {
+            spawn('cmd', ['/c', 'start', url], { stdio: 'ignore' });
+        } else if (platform === 'darwin') {
+            spawn('open', [url], { stdio: 'ignore' });
+        } else {
+            spawn('xdg-open', [url], { stdio: 'ignore' });
+        }
+        hasAttemptedOpenBrowser = true;
+        logger.info('已打开播放器页面: %s', url);
+    } catch (err: any) {
+        logger.warn('打开播放器页面失败: %s', err.message);
+    }
+}
+
+/**
  * 启动音频播放器服务器（延迟启动，由外部调用）
  */
 export function startPlayerServer(): void {
     if (httpServer) {
-        logger.debug('音频播放器服务器已在运行');
-        return;
+        // 服务器已运行，检查连接状态
+        if (isPlayerConnected()) {
+            logger.debug('音频播放器服务器已在运行，播放器已连接');
+            return;
+        } else {
+            logger.info('音频播放器服务器已在运行，但播放器未连接，等待重连...');
+            // 等待3秒后如果还没连接，尝试重新打开
+            if (connectionCheckTimer) {
+                clearTimeout(connectionCheckTimer);
+            }
+            connectionCheckTimer = setTimeout(() => {
+                if (!isPlayerConnected()) {
+                    logger.info('播放器仍未连接，尝试重新打开播放器页面...');
+                    openBrowserPage();
+                }
+            }, 3000);
+            return;
+        }
     }
     
     try {
+        hasAttemptedOpenBrowser = false; // 重置标记
         startAudioPlayerServer();
     } catch (err: any) {
         logger.error('启动音频播放器服务器失败: %s', err.message);

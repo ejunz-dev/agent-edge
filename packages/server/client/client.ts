@@ -71,9 +71,39 @@ function startConnecting(ctx?: Context) {
         }
         connecting = true;
         logger.info('尝试连接上游：%s', url);
-        ws = new WS(url);
+        
+        // 添加连接超时处理（与握手超时时间匹配）
+        const connectTimeout = setTimeout(() => {
+            if (ws && ws.readyState !== WS.OPEN && ws.readyState !== WS.CLOSED) {
+                logger.error('连接超时（10秒），可能是服务器未响应或 WebSocket 端点不存在');
+                logger.error('提示：请确保服务器已启动（yarn dev:server），并且 WebSocket 端点 /edge/conn 可用');
+                try { ws.close(); } catch { /* ignore */ }
+                connecting = false;
+                scheduleReconnect();
+            }
+        }, 18000); // 比握手超时稍长
+        
+        // Windows 上可能需要更长的超时时间，或者使用不同的配置
+        const wsOptions: any = {
+            handshakeTimeout: 15000, // 增加到15秒
+            perMessageDeflate: false, // 禁用压缩，可能有助于 Windows 兼容性
+            // 添加超时重试相关选项
+            maxReconnects: 0, // 不使用自动重连，我们自己处理
+        };
+        
+        // 在 Windows 上，尝试不同的配置
+        if (process.platform === 'win32') {
+            // Windows 上可能需要不同的配置
+            // 移除 agent，使用原生 socket
+            wsOptions.agent = undefined;
+            
+            logger.debug('[Windows] WebSocket 连接 URL: %s', url);
+        }
+        
+        ws = new WS(url, wsOptions);
 
         ws.on('open', () => {
+            clearTimeout(connectTimeout);
             logger.info('上游连接已建立：%s', url);
             retryDelay = 3000; // 重置退避
             connecting = false;
@@ -86,12 +116,11 @@ function startConnecting(ctx?: Context) {
             globalVoiceClient.on('response', (data: any) => {
                 logger.info('收到语音回复');
             });
-            // 通知 Electron（如果正在运行）
-            if (typeof process.send === 'function') {
-                try {
-                    process.send({ type: 'voice-client-ready' });
-                } catch { /* ignore */ }
-            }
+        });
+        
+        // 添加连接状态变化日志
+        ws.on('upgrade', () => {
+            logger.debug('WebSocket 握手中...');
         });
 
         ws.on('message', async (data: any) => {
@@ -100,18 +129,41 @@ function startConnecting(ctx?: Context) {
                 try { ws.send('pong'); } catch { /* ignore */ }
                 return;
             }
-            // 非 JSON-RPC 的简单消息日志
-            logger.debug?.('上游消息：%s', text.slice(0, 2000));
+            // 非 JSON-RPC 的简单消息日志（仅记录消息类型，不输出完整内容）
+            try {
+                const msg = JSON.parse(text);
+                if (msg.key && msg.key !== 'voice_chat_audio') {
+                    // 只记录非音频消息的 key
+                    logger.debug?.('上游消息：key=%s', msg.key);
+                }
+                // voice_chat_audio 消息太多，不记录
+            } catch {
+                // 非 JSON 消息，可能是 ping/pong，不记录
+            }
         });
 
         ws.on('close', (code: number, reason: Buffer) => {
+            clearTimeout(connectTimeout);
             logger.warn('上游连接关闭（code=%s, reason=%s）', code, reason?.toString?.() || '');
             connecting = false;
             scheduleReconnect();
         });
 
         ws.on('error', (err: Error) => {
+            clearTimeout(connectTimeout);
             logger.error('上游连接错误：%s', err.message);
+            // 提供更详细的错误信息
+            if (err.message.includes('ECONNREFUSED')) {
+                logger.error('连接被拒绝，请确保服务器已启动（运行 yarn dev:server）');
+            } else if (err.message.includes('ENOTFOUND') || err.message.includes('getaddrinfo')) {
+                logger.error('无法解析主机名，请检查配置中的 server 地址');
+            } else if (err.message.includes('timeout') || err.message.includes('handshake')) {
+                logger.error('WebSocket 握手超时，可能是：');
+                logger.error('  1. 服务器未正确启动或 WebSocket 端点 /edge/conn 不存在');
+                logger.error('  2. Windows 防火墙阻止了连接');
+                logger.error('  3. 端口被其他程序占用');
+                logger.error('请检查服务器终端日志中是否有 "Edge client connected" 的记录');
+            }
             connecting = false;
             try { ws.close(); } catch { /* ignore */ }
             scheduleReconnect();

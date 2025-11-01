@@ -794,19 +794,30 @@ export async function apply(ctx: Context) {
     }, 500);
 
     // 优雅关闭
-    process.on('SIGINT', () => {
+    const cleanup = () => {
         if (connectionCheckInterval) {
             clearInterval(connectionCheckInterval);
             connectionCheckInterval = null;
         }
         stopAutoVoiceMonitoring();
-    });
-    process.on('SIGTERM', () => {
-        if (connectionCheckInterval) {
-            clearInterval(connectionCheckInterval);
-            connectionCheckInterval = null;
+        
+        // 关闭实时 ASR 连接
+        if (realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
+            try {
+                realtimeAsrWs.close(1000, 'shutdown');
+            } catch { /* ignore */ }
+            realtimeAsrWs = null;
         }
-        stopAutoVoiceMonitoring();
-    });
+        
+        // 清理状态
+        isRealtimeAsrActive = false;
+        isMonitoring = false;
+        isCollecting = false;
+        audioBuffer = [];
+        currentTranscription = '';
+    };
+    
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
 }
 

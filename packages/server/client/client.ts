@@ -49,6 +49,7 @@ function startConnecting(ctx?: Context) {
     let retryDelay = 3000;
     let reconnectTimer: NodeJS.Timeout | null = null;
     let connecting = false;
+    let connectTimeout: NodeJS.Timeout | null = null;
 
     const scheduleReconnect = () => {
         if (stopped) return;
@@ -72,8 +73,14 @@ function startConnecting(ctx?: Context) {
         connecting = true;
         logger.info('尝试连接上游：%s', url);
         
+        // 清除之前的超时器（如果有）
+        if (connectTimeout) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+        }
+        
         // 添加连接超时处理（与握手超时时间匹配）
-        const connectTimeout = setTimeout(() => {
+        connectTimeout = setTimeout(() => {
             if (ws && ws.readyState !== WS.OPEN && ws.readyState !== WS.CLOSED) {
                 logger.error('连接超时（10秒），可能是服务器未响应或 WebSocket 端点不存在');
                 logger.error('提示：请确保服务器已启动（yarn dev:server），并且 WebSocket 端点 /edge/conn 可用');
@@ -81,6 +88,7 @@ function startConnecting(ctx?: Context) {
                 connecting = false;
                 scheduleReconnect();
             }
+            connectTimeout = null;
         }, 18000); // 比握手超时稍长
         
         // Windows 上可能需要更长的超时时间，或者使用不同的配置
@@ -103,11 +111,26 @@ function startConnecting(ctx?: Context) {
         ws = new WS(url, wsOptions);
 
         ws.on('open', () => {
-            clearTimeout(connectTimeout);
+            if (connectTimeout) {
+                clearTimeout(connectTimeout);
+                connectTimeout = null;
+            }
             logger.info('上游连接已建立：%s', url);
             retryDelay = 3000; // 重置退避
             connecting = false;
             try { ws.send('{"key":"ping"}'); } catch { /* ignore */ }
+            
+            // 上游连接成功后，启动音频播放器服务器
+            try {
+                const { startPlayerServer } = require('./audio-player-server');
+                if (startPlayerServer) {
+                    logger.info('上游连接已建立，启动音频播放器服务器...');
+                    startPlayerServer();
+                }
+            } catch (err: any) {
+                logger.debug('启动音频播放器服务器失败（将使用本地播放）: %s', err.message);
+            }
+            
             // 初始化语音客户端
             globalVoiceClient = new VoiceClient({ ws });
             globalVoiceClient.on('error', (err: Error) => {
@@ -143,14 +166,20 @@ function startConnecting(ctx?: Context) {
         });
 
         ws.on('close', (code: number, reason: Buffer) => {
-            clearTimeout(connectTimeout);
+            if (connectTimeout) {
+                clearTimeout(connectTimeout);
+                connectTimeout = null;
+            }
             logger.warn('上游连接关闭（code=%s, reason=%s）', code, reason?.toString?.() || '');
             connecting = false;
             scheduleReconnect();
         });
 
         ws.on('error', (err: Error) => {
-            clearTimeout(connectTimeout);
+            if (connectTimeout) {
+                clearTimeout(connectTimeout);
+                connectTimeout = null;
+            }
             logger.error('上游连接错误：%s', err.message);
             // 提供更详细的错误信息
             if (err.message.includes('ECONNREFUSED')) {
@@ -174,8 +203,35 @@ function startConnecting(ctx?: Context) {
 
     return () => {
         stopped = true;
-        globalVoiceClient = null;
-        try { ws?.close?.(1000, 'shutdown'); } catch { /* ignore */ }
+        
+        // 清理定时器
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        if (connectTimeout) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+        }
+        
+        // 关闭 WebSocket 连接
+        if (ws) {
+            try {
+                ws.removeAllListeners(); // 移除所有监听器，避免内存泄漏
+                if (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING) {
+                    ws.close(1000, 'shutdown');
+                }
+            } catch { /* ignore */ }
+            ws = null;
+        }
+        
+        // 清理语音客户端
+        if (globalVoiceClient) {
+            try {
+                globalVoiceClient.removeAllListeners();
+            } catch { /* ignore */ }
+            globalVoiceClient = null;
+        }
     };
 }
 
@@ -187,9 +243,33 @@ export function getVoiceClient(): VoiceClient | null {
 export async function apply(ctx: Context) {
     // 使用定时器持有清理函数，避免类型不匹配的事件绑定
     const dispose = startConnecting(ctx);
+    
     // 优雅关闭
-    process.on('SIGINT', () => { try { dispose(); } catch { /* ignore */ } process.exit(0); });
-    process.on('SIGTERM', () => { try { dispose(); } catch { /* ignore */ } process.exit(0); });
+    const cleanup = () => {
+        try {
+            dispose();
+        } catch (err: any) {
+            logger.error('清理客户端连接失败: %s', err.message);
+        }
+        // 强制退出，避免进程挂起
+        setTimeout(() => {
+            process.exit(0);
+        }, 1000);
+    };
+    
+    // Windows 上也需要监听这些信号
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+    
+    // Windows 上的 Ctrl+C 会触发 SIGINT，但有时需要直接监听
+    if (process.platform === 'win32') {
+        // Windows 上监听关闭事件
+        process.on('exit', () => {
+            try {
+                dispose();
+            } catch { /* ignore */ }
+        });
+    }
 }
 
 

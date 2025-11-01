@@ -28,13 +28,14 @@ async function applyServer(ctx: Context) {
         ctx.plugin(require('./service/voice')),
         ctx.plugin(require('./ejunz')),
     ]);
-    await ctx.inject(['server', 'dbservice', 'voice'], async (c) => {
+        await ctx.inject(['server', 'dbservice', 'voice'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/misc')),
             c.plugin(require('./handler/mcp')),
             c.plugin(require('./handler/edge')),
             c.plugin(require('./handler/client')),
             c.plugin(require('./handler/asr-proxy')),
+            c.plugin(require('./handler/audio-player')),
         ]);
         c.server.listen();
     });
@@ -44,6 +45,8 @@ function applyClient(ctx: Context) {
     ctx.plugin(require('./client/client'));
     // 启动自动语音交互
     ctx.plugin(require('./client/voice-auto'));
+    // 启动音频播放器服务器（client 模式专用）
+    ctx.plugin(require('./client/audio-player-server'));
 }
 
 async function apply(ctx) {

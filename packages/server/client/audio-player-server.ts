@@ -36,7 +36,7 @@ function startAudioPlayerServer(): void {
         return;
     }
 
-    // 创建 HTTP 服务器
+    // 创建 HTTP 服务器（同时处理音频播放器和 VTuber 路由）
     httpServer = http.createServer((req, res) => {
         if (req.url === '/audio-player') {
             // 提供播放器页面
@@ -61,11 +61,11 @@ function startAudioPlayerServer(): void {
         }
     });
 
-    // 创建 WebSocket 服务器
-    wss = new WebSocket.Server({ server: httpServer });
+    // 创建 WebSocket 服务器（使用 /audio-ws 路径）
+    wss = new WebSocket.Server({ server: httpServer, path: '/audio-ws' });
 
-    wss.on('connection', (ws: any) => {
-        logger.info('前端音频播放器已连接');
+    wss.on('connection', (ws: any, req: any) => {
+        logger.info('前端音频播放器已连接: %s', req.url);
         clientWs = ws;
 
         ws.on('message', (data) => {
@@ -158,6 +158,13 @@ function stopAudioPlayerServer(): void {
 }
 
 /**
+ * 获取 HTTP 服务器实例（供其他模块共享）
+ */
+export function getHttpServer(): http.Server | null {
+    return httpServer;
+}
+
+/**
  * 转发音频分片到前端播放器
  */
 export function forwardAudioChunk(chunkBase64: string): boolean {
@@ -174,12 +181,11 @@ export function forwardAudioChunk(chunkBase64: string): boolean {
         return false;
     }
     try {
-        const chunkSize = chunkBase64 ? chunkBase64.length : 0;
         clientWs.send(JSON.stringify({
             type: 'audio_chunk',
             chunk: chunkBase64
         }));
-        logger.debug('已转发音频分片到前端播放器: %d bytes', chunkSize);
+        // 音频分片已成功转发，不再记录日志以减少噪音
         return true;
     } catch (err: any) {
         logger.warn('转发音频分片失败: %s', err.message);

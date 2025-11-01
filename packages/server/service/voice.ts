@@ -388,9 +388,11 @@ class VoiceService extends Service implements IVoiceService {
 
                 if (provider === 'ejunz' || requestFormat === 'simple') {
                     // 简单格式：只发送当前消息
+                    // 注意：简单格式无法注入系统提示词，建议在API端配置
                     // 例如: {"message": "Hello"}
                     requestBody = { message };
                     this.logger.debug('使用简单格式发送AI请求到 %s: %s', endpoint, JSON.stringify(requestBody));
+                    this.logger.warn('简单格式不支持系统提示词注入，VTuber动画提示词将被跳过。建议在API端配置或使用OpenAI格式。');
                 } else {
                     // OpenAI标准格式：包含对话历史
                     const messages = [...conversationHistory];
@@ -474,6 +476,7 @@ class VoiceService extends Service implements IVoiceService {
                throw new Error(`AI对话失败: ${error.message}`);
            }
     }
+
 
     /**
      * Qwen TTS Realtime WebSocket实现（流式版本）

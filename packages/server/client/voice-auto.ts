@@ -1198,7 +1198,7 @@ let connectionCheckInterval: NodeJS.Timeout | null = null;
 let hasStarted = false;
 
 export async function apply(ctx: Context) {
-    // 等待 WebSocket 连接建立后再启动
+    // 等待 WebSocket 连接建立，并等待 VTube Studio 认证完成后再启动
     connectionCheckInterval = setInterval(() => {
         if (hasStarted) {
             return; // 已经启动，不再检查
@@ -1213,20 +1213,49 @@ export async function apply(ctx: Context) {
                     connectionCheckInterval = null;
                 }
                 hasStarted = true;
-                logger.info('上游连接已建立，开始初始化语音监听服务...');
                 
-                // 初始化键盘监听
-                initKeyboardListener();
-                
-                // 延迟一小段时间确保连接稳定
-                setTimeout(async () => {
+                // 异步等待 VTube Studio 认证完成后再启动
+                (async () => {
+                    // 检查 VTube Studio 是否已经认证完成（最多等待 30 秒）
                     try {
-                        await startAutoVoiceMonitoring();
+                        const { getVTubeStudioClient, waitForVTubeStudioAuthentication } = require('./vtuber-vtubestudio');
+                        const vtsClient = getVTubeStudioClient();
+                        
+                        if (vtsClient) {
+                            // 如果还没有认证，等待认证完成
+                            if (!vtsClient.isConnected()) {
+                                logger.info('等待 VTube Studio 认证完成后再启动语音监听服务（最多 30 秒）...');
+                                const authenticated = await waitForVTubeStudioAuthentication(30000);
+                                if (authenticated) {
+                                    logger.info('✓ VTube Studio 认证完成，可以启动语音监听服务');
+                                } else {
+                                    logger.warn('VTube Studio 认证未完成（30秒超时），继续启动语音监听服务');
+                                }
+                            } else {
+                                logger.debug('VTube Studio 已认证，可以启动语音监听服务');
+                            }
+                        } else {
+                            logger.debug('VTube Studio 未启用，直接启动语音监听服务');
+                        }
                     } catch (err: any) {
-                        logger.error('启动自动语音监听失败: %s', err.message);
-                        hasStarted = false; // 允许重试
+                        logger.debug('检查 VTube Studio 状态失败，继续启动语音监听服务: %s', err.message);
                     }
-                }, 1000);
+                    
+                    logger.info('上游连接已建立，开始初始化语音监听服务...');
+                    
+                    // 初始化键盘监听
+                    initKeyboardListener();
+                    
+                    // 延迟一小段时间确保连接稳定
+                    setTimeout(async () => {
+                        try {
+                            await startAutoVoiceMonitoring();
+                        } catch (err: any) {
+                            logger.error('启动自动语音监听失败: %s', err.message);
+                            hasStarted = false; // 允许重试
+                        }
+                    }, 1000);
+                })();
             }
         }
     }, 500);

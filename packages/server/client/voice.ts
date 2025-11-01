@@ -197,19 +197,103 @@ export class VoiceClient extends EventEmitter {
                         logger.info('🤖 AI: %s', aiResponse);
                     }
                     
+                    // 客户端随机选择动画序列（2-3个动画）
+                    const selectRandomAnimations = async (): Promise<Array<{ name: string; duration: number }>> => {
+                        try {
+                            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                            const vtsClient = getVTubeStudioClient();
+                            if (vtsClient && vtsClient.isConnected()) {
+                                logger.info('🎲 开始随机选择动画序列...');
+                                const hotkeys = await vtsClient.getHotkeys();
+                                if (hotkeys && hotkeys.length > 0) {
+                                    // 随机选择2-3个热键
+                                    const count = Math.floor(Math.random() * 2) + 2; // 2或3个
+                                    const shuffled = [...hotkeys].sort(() => Math.random() - 0.5);
+                                    const animations = shuffled.slice(0, count).map(h => ({
+                                        name: h.name,
+                                        duration: 2000,
+                                    }));
+                                    logger.info('🎲 随机选择动画序列: %s', animations.map(a => a.name).join(', '));
+                                    return animations;
+                                } else {
+                                    logger.warn('⚠️ 没有可用热键，无法随机选择动画');
+                                }
+                            } else {
+                                logger.warn('⚠️ VTube Studio 未连接，无法随机选择动画');
+                            }
+                        } catch (err: any) {
+                            logger.error('随机选择动画失败: %s', err.message);
+                        }
+                        return [];
+                    };
+                    
                     // 更新对话历史
                     this.conversationHistory.push({ role: 'user', content: transcribedText });
                     this.conversationHistory.push({ role: 'assistant', content: aiResponse });
                     
                     // 播放音频（非流式模式）
                     if (audio && !streaming) {
-                        this.playAudio(audio).catch((e) => {
+                        // 等待动画选择完成，然后开始持续触发
+                        selectRandomAnimations().then((animations) => {
+                            if (animations.length > 0) {
+                                (this as any).pendingAnimations = animations;
+                                logger.info('🎬 非流式模式：启动动画序列: %s', animations.map(a => a.name).join(', '));
+                                try {
+                                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                    const vtsClient = getVTubeStudioClient();
+                                    if (vtsClient && vtsClient.isConnected()) {
+                                        vtsClient.startContinuousAnimation(animations);
+                                    } else {
+                                        logger.warn('⚠️ VTube Studio 未连接，无法启动动画');
+                                    }
+                                } catch (err: any) {
+                                    logger.error('启动动画序列失败: %s', err.message);
+                                }
+                            } else {
+                                logger.warn('⚠️ 没有选择到动画，animations 为空');
+                            }
+                        });
+                        
+                        // 播放音频，播放完成后停止动画
+                        this.playAudio(audio).then(() => {
+                            // 播放完成，停止动画
+                            try {
+                                const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                const vtsClient = getVTubeStudioClient();
+                                if (vtsClient && vtsClient.isConnected()) {
+                                    vtsClient.stopContinuousAnimation();
+                                }
+                            } catch (err: any) {
+                                logger.debug('停止动画失败: %s', err.message);
+                            }
+                        }).catch((e) => {
                             logger.error('播放音频失败: %s', e.message);
+                            // 播放失败也要停止动画
+                            try {
+                                const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                const vtsClient = getVTubeStudioClient();
+                                if (vtsClient && vtsClient.isConnected()) {
+                                    vtsClient.stopContinuousAnimation();
+                                }
+                            } catch (err: any) {
+                                // 忽略错误
+                            }
                             this.emit('error', e);
                         });
                     } else if (streaming) {
-                        // 流式模式：初始化流式播放器
-                        this.initStreamingPlayback();
+                        // 流式模式：先选择动画，然后初始化流式播放器
+                        selectRandomAnimations().then((animations) => {
+                            if (animations.length > 0) {
+                                (this as any).pendingAnimations = animations;
+                                logger.info('🎬 流式模式：准备初始化播放，pendingAnimations: %s', animations.map(a => a.name).join(', '));
+                            } else {
+                                logger.warn('⚠️ 流式模式：没有选择到动画');
+                            }
+                            this.initStreamingPlayback();
+                        }).catch((err) => {
+                            logger.error('流式模式：选择动画失败，继续播放: %s', err.message);
+                            this.initStreamingPlayback();
+                        });
                     }
                     
                     this.emit('response', { text: transcribedText, aiResponse, audio });
@@ -1143,6 +1227,37 @@ export class VoiceClient extends EventEmitter {
      * 初始化流式音频播放
      */
     private initStreamingPlayback(): void {
+        // 通知 VTube Studio 开始说话并开始持续触发动画
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+            const vtsClient = getVTubeStudioClient();
+            if (vtsClient && vtsClient.isConnected()) {
+                logger.info('🎬 initStreamingPlayback: VTube Studio 已连接，检查 pendingAnimations');
+                // 设置说话状态（用于嘴型同步）
+                if (audioSync.enabled === true) {
+                    vtsClient.setParameter('Speaking', 1.0);
+                    logger.debug('已通知 VTube Studio 开始说话');
+                }
+                
+                // 如果有待播放的动画序列，开始持续触发
+                if ((this as any).pendingAnimations && Array.isArray((this as any).pendingAnimations) && (this as any).pendingAnimations.length > 0) {
+                    const animNames = (this as any).pendingAnimations.map((a: any) => a.name).join(', ');
+                    logger.info('🎬 流式模式：开始持续触发动画序列: %s', animNames);
+                    vtsClient.startContinuousAnimation((this as any).pendingAnimations);
+                    (this as any).pendingAnimations = null; // 清除
+                } else {
+                    logger.warn('⚠️ initStreamingPlayback: pendingAnimations 为空或无效，无法启动动画');
+                    logger.debug('pendingAnimations 值: %s', JSON.stringify((this as any).pendingAnimations));
+                }
+            }
+        } catch (err: any) {
+            logger.debug('设置 VTube Studio 说话状态失败: %s', err.message);
+        }
         // 清理之前的播放
         if (this.streamingAudioProcess) {
             try {
@@ -1175,12 +1290,45 @@ export class VoiceClient extends EventEmitter {
      * 播放音频分片（流式）
      */
     private async playAudioChunk(chunkBase64: string): Promise<void> {
-        // 只使用 Web 音频播放器，不进行本地播放回退
+        // 检查是否启用 VTube Studio 音频同步（嘴型同步）
+        // 注意：VTube Studio 只用于嘴型同步，不播放音频
+        // 音频仍需通过系统播放，以便直播软件捕获
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            // 如果启用音频同步，分析音频并发送到 VTube Studio（用于嘴型同步）
+            if (audioSync.enabled === true && chunkBase64) {
+                try {
+                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                    const vtsClient = getVTubeStudioClient();
+                    if (vtsClient && vtsClient.isConnected()) {
+                        vtsClient.processAudioChunk(chunkBase64, {
+                            parameterName: audioSync.parameterName || 'VoiceVolume',
+                            minVolume: 0.0,
+                            maxVolume: 1.0,
+                        });
+                    }
+                } catch (err: any) {
+                    logger.debug('VTube Studio 音频同步失败: %s', err.message);
+                }
+            }
+        } catch (err: any) {
+            logger.debug('读取 VTube Studio 配置失败: %s', err.message);
+        }
+
+        // 注意：VTube Studio 只用于嘴型同步，不播放音频
+        // 音频仍然需要通过系统播放，这样直播软件（如 OBS）才能捕获音频
+        // 所以即使启用了 VTube Studio 音频同步，我们也需要继续播放音频到系统
+
+        // 使用 Web 音频播放器（确保音频能被直播软件捕获）
         if (this.useWebAudioPlayer) {
             try {
                 const { forwardAudioChunk } = require('./audio-player-server');
                 if (forwardAudioChunk && forwardAudioChunk(chunkBase64)) {
-                    logger.debug('音频分片已转发到 Web 播放器: %d bytes', chunkBase64 ? chunkBase64.length : 0);
+                    // 音频分片已成功转发，不再记录日志以减少噪音
                     return; // 成功转发
                 } else {
                     logger.warn('Web 音频播放器转发失败，音频将被丢弃');
@@ -1358,6 +1506,31 @@ export class VoiceClient extends EventEmitter {
      * 完成流式播放
      */
     private finalizeStreamingPlayback(): void {
+        // 通知 VTube Studio 停止说话并停止动画
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+            const vtsClient = getVTubeStudioClient();
+            if (vtsClient && vtsClient.isConnected()) {
+                // 停止持续触发动画
+                vtsClient.stopContinuousAnimation();
+                
+                // 设置说话状态为 0，并重置音量参数
+                if (audioSync.enabled === true) {
+                    vtsClient.setParameter('Speaking', 0.0);
+                    const paramName = audioSync.parameterName || 'VoiceVolume';
+                    vtsClient.setParameter(paramName, 0.0);
+                    logger.debug('已通知 VTube Studio 停止说话');
+                }
+            }
+        } catch (err: any) {
+            logger.debug('重置 VTube Studio 说话状态失败: %s', err.message);
+        }
+
         // 只使用 Web 音频播放器，发送完成信号
         if (this.useWebAudioPlayer) {
             try {
@@ -1381,6 +1554,16 @@ export class VoiceClient extends EventEmitter {
      * 清理流式音频资源
      */
     private cleanupStreamingAudio(): void {
+        // 停止动画（如果还在播放）
+        try {
+            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+            const vtsClient = getVTubeStudioClient();
+            if (vtsClient && vtsClient.isConnected()) {
+                vtsClient.stopContinuousAnimation();
+            }
+        } catch (err: any) {
+            // 忽略错误
+        }
         // 清除启动定时器
         if (this.streamingPlaybackTimer) {
             clearTimeout(this.streamingPlaybackTimer);

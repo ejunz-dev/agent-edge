@@ -44,3 +44,12 @@ export interface MCPServerDoc {
     createdAt: number;
     metadata?: Record<string, any>;
 }
+
+export interface VTuberAuthTokenDoc {
+    _id: string;
+    host: string;
+    port: number;
+    authToken: string;
+    updatedAt: number;
+    createdAt: number;
+}

@@ -8,6 +8,23 @@ const logger = new Logger('client');
 // 全局语音客户端实例
 let globalVoiceClient: VoiceClient | null = null;
 
+// 全局 WebSocket 连接（用于向 server 发送消息）
+let globalWsConnection: any = null;
+
+/**
+ * 获取全局 WebSocket 连接
+ */
+export function getGlobalWsConnection(): any {
+    return globalWsConnection;
+}
+
+/**
+ * 设置全局 WebSocket 连接
+ */
+export function setGlobalWsConnection(ws: any): void {
+    globalWsConnection = ws;
+}
+
 function normalizeUpstreamFromHost(host: string): string {
     if (!host) return '';
     // 支持用户把 host 写成完整 URL
@@ -118,20 +135,87 @@ function startConnecting(ctx?: Context) {
             logger.info('上游连接已建立：%s', url);
             retryDelay = 3000; // 重置退避
             connecting = false;
+            globalWsConnection = ws; // 保存全局 WebSocket 连接（在连接建立后立即设置）
             try { ws.send('{"key":"ping"}'); } catch { /* ignore */ }
             
-            // 上游连接成功后，启动音频播放器服务器
-            try {
-                const { startPlayerServer } = require('./audio-player-server');
-                if (startPlayerServer) {
-                    logger.info('上游连接已建立，启动音频播放器服务器...');
-                    startPlayerServer();
+            // 上游连接成功后，先启动 VTube Studio 并等待认证完成，然后再启动其他服务
+            // 延迟一点时间，确保 WebSocket 完全就绪
+            setTimeout(async () => {
+                try {
+                    const config = require('../config').config as any;
+                    const vtuberConfig = config.vtuber || {};
+                    
+                    // 先启动 VTube Studio（如果启用）
+                    if (vtuberConfig.enabled !== false) {
+                        const { startVTuberServer } = require('./vtuber-server');
+                        const { waitForVTubeStudioAuthentication } = require('./vtuber-vtubestudio');
+                        
+                        if (startVTuberServer) {
+                            logger.info('上游连接已稳定，启动 VTube Studio 控制...');
+                            await startVTuberServer(); // 等待数据库加载完成
+                            
+                            // 等待 VTube Studio 认证完成（最多等待 30 秒，包括可能需要用户手动授权的情况）
+                            logger.info('等待 VTube Studio 认证完成（最多 30 秒，如需授权请尽快在 VTube Studio 中确认）...');
+                            const authenticated = await waitForVTubeStudioAuthentication(30000);
+                            
+                            if (authenticated) {
+                                logger.info('✓ VTube Studio 认证完成，继续初始化其他服务');
+                            } else {
+                                logger.warn('⚠️  VTube Studio 认证未完成（30秒超时），继续启动其他服务');
+                                logger.warn('提示：如果这是首次连接，请确保已在 VTube Studio 中授权此插件');
+                            }
+                        } else {
+                            logger.warn('startVTuberServer 函数不存在');
+                        }
+                        
+                        // 初始化 OSC 桥接器（如果启用）- 在 VTube Studio 认证后启动
+                        if (vtuberConfig.osc?.enabled) {
+                            try {
+                                const { initOSCBridge } = require('./vtuber-osc-bridge');
+                                initOSCBridge(vtuberConfig.osc.host, vtuberConfig.osc.port);
+                                logger.info('VTuber OSC 桥接器已启动: %s:%d', vtuberConfig.osc.host, vtuberConfig.osc.port);
+                            } catch (err: any) {
+                                logger.debug('启动 OSC 桥接器失败: %s', err.message);
+                            }
+                        }
+                    } else {
+                        logger.debug('VTuber 功能已禁用');
+                    }
+                    
+                    // VTube Studio 认证完成（或跳过）后，启动音频播放器服务器
+                    try {
+                        const { startPlayerServer } = require('./audio-player-server');
+                        if (startPlayerServer) {
+                            logger.info('启动音频播放器服务器...');
+                            startPlayerServer();
+                        }
+                    } catch (err: any) {
+                        logger.debug('启动音频播放器服务器失败（将使用本地播放）: %s', err.message);
+                    }
+                    
+                    // VTube Studio 和音频播放器都启动后，再启动 voice-auto
+                    logger.info('VTube Studio 初始化完成，准备启动语音监听服务...');
+                    
+                } catch (err: any) {
+                    logger.error('启动VTuber控制服务器失败: %s', err.message);
+                    logger.error(err.stack);
+                    
+                    // 即使 VTube Studio 启动失败，也要启动音频播放器
+                    try {
+                        const { startPlayerServer } = require('./audio-player-server');
+                        if (startPlayerServer) {
+                            startPlayerServer();
+                        }
+                    } catch (e: any) {
+                        logger.debug('启动音频播放器服务器失败: %s', e.message);
+                    }
+                    
+                    // 即使失败也继续启动语音服务
+                    logger.info('继续启动语音监听服务...');
                 }
-            } catch (err: any) {
-                logger.debug('启动音频播放器服务器失败（将使用本地播放）: %s', err.message);
-            }
+            }, 100); // 延迟 100ms，确保 WebSocket 消息路由完全就绪
             
-            // 初始化语音客户端
+            // 初始化语音客户端（不阻塞，可以在后台运行）
             globalVoiceClient = new VoiceClient({ ws });
             globalVoiceClient.on('error', (err: Error) => {
                 logger.error('语音客户端错误: %s', err.message);
@@ -152,9 +236,15 @@ function startConnecting(ctx?: Context) {
                 try { ws.send('pong'); } catch { /* ignore */ }
                 return;
             }
-            // 非 JSON-RPC 的简单消息日志（仅记录消息类型，不输出完整内容）
+            // 处理可能的 JSON-RPC 响应或其他消息
             try {
                 const msg = JSON.parse(text);
+                // VTube Studio 认证令牌相关的消息需要被其他模块处理，这里只记录
+                if (msg.key === 'vtuber_auth_token_get' || msg.key === 'vtuber_auth_token_save') {
+                    logger.debug('收到 VTube Studio 认证令牌消息: %s', msg.key);
+                    // 不在这里处理，让其他模块的监听器处理
+                    return;
+                }
                 if (msg.key && msg.key !== 'voice_chat_audio') {
                     // 只记录非音频消息的 key
                     logger.debug?.('上游消息：key=%s', msg.key);

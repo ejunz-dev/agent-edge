@@ -144,11 +144,56 @@ const serverSchema = Schema.object({
             listenKey: 'Backquote',
             modifiers: [],
         }),
+        // VTuber 配置
+        vtuber: Schema.object({
+            enabled: Schema.boolean().default(true), // 是否启用 VTuber 控制
+            engine: Schema.string().default('vtubestudio').role('radio', ['vtubestudio', 'osc']), // VTuber 引擎类型：vtubestudio（VTube Studio）、osc（OSC协议如VSeeFace）
+            vtubestudio: Schema.object({
+                host: Schema.string().default('127.0.0.1'), // VTube Studio WebSocket 主机
+                port: Schema.number().default(8001), // VTube Studio WebSocket 端口（默认 8001）
+                apiName: Schema.string().default('Agent Edge VTuber Control'), // API 名称
+                apiVersion: Schema.string().default('1.0'), // API 版本
+                authToken: Schema.string().default(''), // 认证令牌（首次连接后自动保存）
+                audioSync: Schema.object({
+                    enabled: Schema.boolean().default(false), // 是否启用音频同步（嘴型同步）
+                    // 注意：VTube Studio 不播放音频，只用于嘴型同步
+                    // 音频仍需要通过系统播放，以便直播软件（如 OBS）捕获
+                    parameterName: Schema.string().default('VoiceVolume'), // 用于嘴型同步的参数名称
+                    updateInterval: Schema.number().default(100), // 参数更新间隔（毫秒）
+                }).default({
+                    enabled: false,
+                    parameterName: 'VoiceVolume',
+                    updateInterval: 100,
+                }),
+            }).default({
+                host: '127.0.0.1',
+                port: 8001,
+                apiName: 'Agent Edge VTuber Control',
+                apiVersion: '1.0',
+                authToken: '',
+                audioSync: { enabled: false, useForPlayback: false, parameterName: 'VoiceVolume', updateInterval: 100 },
+            }),
+            osc: Schema.object({
+                enabled: Schema.boolean().default(false), // 是否启用 OSC 桥接（用于桌面应用）
+                host: Schema.string().default('127.0.0.1'), // OSC 目标主机
+                port: Schema.number().default(9000), // OSC 目标端口（VSeeFace 默认 9000）
+            }).default({
+                enabled: false,
+                host: '127.0.0.1',
+                port: 9000,
+            }),
+        }).default({
+            enabled: true,
+            engine: 'vtubestudio',
+            vtubestudio: { host: '127.0.0.1', port: 8001, apiName: 'Agent Edge VTuber Control', apiVersion: '1.0', authToken: '', audioSync: { enabled: false, parameterName: 'VoiceVolume', updateInterval: 100 } },
+            osc: { enabled: false, host: '127.0.0.1', port: 9000 },
+        }),
     }).default({
         asr: { provider: '', apiKey: '', endpoint: '', model: 'whisper-1', enableServerVad: true, baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', language: 'zh' },
         tts: { provider: '', apiKey: '', endpoint: '', voice: 'alloy', model: 'qwen3-tts-flash', languageType: 'Chinese' },
         ai: { provider: '', apiKey: '', endpoint: '', model: 'gpt-3.5-turbo', authHeader: 'Authorization', authPrefix: 'Bearer', requestFormat: 'openai' },
         keyboard: { listenKey: 'Backquote', modifiers: [] },
+        vtuber: { enabled: true, engine: 'vtubestudio', vtubestudio: { host: '127.0.0.1', port: 8001, apiName: 'Agent Edge VTuber Control', apiVersion: '1.0', authToken: '', audioSync: { enabled: false, useForPlayback: false, parameterName: 'VoiceVolume', updateInterval: 100 } }, osc: { enabled: false, host: '127.0.0.1', port: 9000 } },
     }),
 }).description('Basic Config');
 const clientSchema = Schema.object({

@@ -136,10 +136,19 @@ const serverSchema = Schema.object({
             authPrefix: 'Bearer',
             requestFormat: 'openai',
         }),
+        // 键盘控制配置
+        keyboard: Schema.object({
+            listenKey: Schema.string().default('Backquote'), // 监听按键，默认为反引号键 `（支持：Space, Control, Alt, Shift, Enter, Backspace, Delete, Tab, Escape, Up, Down, Left, Right, Home, End, PageUp, PageDown, F1-F12, A-Z, 0-9, Backquote 等）
+            modifiers: Schema.array(Schema.string()).default([]), // 修饰键数组，例如：['Control', 'Shift'] 表示 Ctrl+Shift+主键
+        }).default({
+            listenKey: 'Backquote',
+            modifiers: [],
+        }),
     }).default({
         asr: { provider: '', apiKey: '', endpoint: '', model: 'whisper-1', enableServerVad: true, baseUrl: 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime', language: 'zh' },
         tts: { provider: '', apiKey: '', endpoint: '', voice: 'alloy', model: 'qwen3-tts-flash', languageType: 'Chinese' },
         ai: { provider: '', apiKey: '', endpoint: '', model: 'gpt-3.5-turbo', authHeader: 'Authorization', authPrefix: 'Bearer', requestFormat: 'openai' },
+        keyboard: { listenKey: 'Backquote', modifiers: [] },
     }),
 }).description('Basic Config');
 const clientSchema = Schema.object({

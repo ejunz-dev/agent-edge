@@ -4,6 +4,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import { getVoiceClient } from './client';
+import { config } from '../config';
 
 const logger = new Logger('voice-auto');
 
@@ -152,11 +153,26 @@ let currentTranscription = ''; // 当前转录文本
 let asrConfig: any = null; // ASR 配置
 let pendingTranscription: ((text: string) => void) | null = null; // 等待转录完成的回调
 let connectPromise: { resolve: () => void; reject: (err: Error) => void } | null = null; // 等待连接建立的 Promise
+let lastCompletedTime = 0; // 最后一次收到 completed 事件的时间（用于判断是否刚完成转录）
+let isWaitingForTranscription = false; // 是否正在等待转录完成
 
 // VAD 参数
 const SOUND_THRESHOLD = -40; // 音量阈值 (dB)
 const SILENCE_TIMEOUT = 1500; // 静音超时时间（毫秒），超过此时间认为停止说话
 const MIN_RECORDING_DURATION = 0; // 最小录音时长（毫秒），设置为0表示不限制，只要有转录结果就发送
+
+// 键盘控制配置
+const keyboardConfig = (config as any).voice?.keyboard || {};
+const listenKey = keyboardConfig.listenKey || 'Backquote'; // 监听按键，默认反引号键 `
+const keyModifiers = keyboardConfig.modifiers || []; // 修饰键数组
+
+let isListening = false; // 是否正在监听（由键盘控制）
+let iohook: any = null; // 键盘监听实例
+const pressedModifiers = new Set<number>(); // 当前按下的修饰键
+
+logger.info('语音监听初始化 (按键控制: %s%s)', 
+    keyModifiers.length > 0 ? `${keyModifiers.join('+')}+` : '', 
+    listenKey);
 
 /**
  * 建立实时 ASR 连接（通过服务器代理）
@@ -341,9 +357,13 @@ async function commitAndWaitTranscription(): Promise<string> {
             logger.debug('[实时ASR] VAD 模式，等待自动检测完成...');
         }
 
+        // 标记正在等待转录
+        isWaitingForTranscription = true;
+        
         // 设置等待转录完成的回调
         pendingTranscription = (text: string) => {
             pendingTranscription = null;
+            isWaitingForTranscription = false;
             resolve(text);
         };
 
@@ -352,9 +372,10 @@ async function commitAndWaitTranscription(): Promise<string> {
         setTimeout(() => {
             if (pendingTranscription) {
                 pendingTranscription = null;
+                isWaitingForTranscription = false;
                 // 如果超时但有当前转录文本，使用它而不是失败
                 if (currentTranscription && currentTranscription.trim()) {
-                    logger.warn('[实时ASR] 转录超时，使用当前转录文本: %s', currentTranscription);
+                    logger.debug('[实时ASR] 转录超时，使用当前转录文本: %s', currentTranscription);
                     resolve(currentTranscription.trim());
                 } else {
                     reject(new Error('转录超时且无转录文本'));
@@ -422,12 +443,40 @@ function handleRealtimeAsrMessage(data: any) {
         const finalText = data.transcript || currentTranscription;
         logger.info(`[实时ASR] 最终转录: ${finalText}`);
         
+        // 标记完成时间
+        lastCompletedTime = Date.now();
+        isWaitingForTranscription = false;
+        
         if (pendingTranscription) {
             pendingTranscription(finalText);
+            pendingTranscription = null;
         }
         
-        // 重置转录文本
-        currentTranscription = '';
+        // 如果不在监听状态（按键已松开），且有待处理的转录结果，直接发送
+        // 这样可以避免在 stopListening() 中再次调用 commitAndWaitTranscription 导致超时
+        if (!isListening && finalText && finalText.trim()) {
+            logger.debug('[实时ASR] 检测到按键已松开，自动发送转录结果');
+            sendTextToServer(finalText.trim()).catch((err) => {
+                logger.error('自动发送转录结果失败: %s', err.message);
+            });
+            // 清空转录文本，避免重复使用
+            currentTranscription = '';
+        } else {
+            // 在监听状态，保存转录结果供后续使用
+            currentTranscription = finalText;
+        }
+    }
+    
+    // 处理新的语音开始（speech_started）
+    // 如果刚刚完成了一次转录（500ms内），且不在监听状态，忽略这个新的 speech_started
+    // 避免按键松开后的噪音导致新的转录等待
+    if (data.type === 'input_audio_buffer.speech_started') {
+        const timeSinceLastCompleted = Date.now() - lastCompletedTime;
+        if (!isListening && timeSinceLastCompleted < 500 && currentTranscription) {
+            logger.debug('[实时ASR] 忽略按键松开后的新语音检测（可能是噪音）');
+            // 清空当前的转录文本，避免与新检测冲突
+            currentTranscription = '';
+        }
     }
 
     // 处理连接关闭
@@ -448,9 +497,370 @@ function handleRealtimeAsrMessage(data: any) {
 }
 
 /**
+ * 将按键名称转换为 Windows 虚拟键码 (VK)
+ */
+function getVirtualKeyCode(keyName: string): number | null {
+    // Windows 虚拟键码映射表
+    const keyMap: { [key: string]: number } = {
+        'Space': 0x20, // VK_SPACE
+        'Enter': 0x0D, // VK_RETURN
+        'Backspace': 0x08, // VK_BACK
+        'Delete': 0x2E, // VK_DELETE
+        'Tab': 0x09, // VK_TAB
+        'Escape': 0x1B, // VK_ESCAPE
+        'Up': 0x26, // VK_UP
+        'Down': 0x28, // VK_DOWN
+        'Left': 0x25, // VK_LEFT
+        'Right': 0x27, // VK_RIGHT
+        'Home': 0x24, // VK_HOME
+        'End': 0x23, // VK_END
+        'PageUp': 0x21, // VK_PRIOR
+        'PageDown': 0x22, // VK_NEXT
+        'F1': 0x70, 'F2': 0x71, 'F3': 0x72, 'F4': 0x73,
+        'F5': 0x74, 'F6': 0x75, 'F7': 0x76, 'F8': 0x77,
+        'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B,
+        'Control': 0x11, 'Ctrl': 0x11, // VK_CONTROL
+        'Alt': 0xA4, 'LeftAlt': 0xA4, 'LAlt': 0xA4, // VK_LMENU (左 Alt)
+        'RightAlt': 0xA5, 'RAlt': 0xA5, // VK_RMENU (右 Alt)
+        'Shift': 0x10, // VK_SHIFT
+        'Meta': 0x5B, 'Windows': 0x5B, 'Command': 0x5B, // VK_LWIN
+        'Backquote': 0xC0, '`': 0xC0, 'Grave': 0xC0, // VK_OEM_3 (反引号键 `)
+    };
+    
+    // 字母键 (A-Z) - VK_A = 0x41
+    if (keyName.length === 1 && /^[A-Z]$/.test(keyName)) {
+        return keyName.charCodeAt(0);
+    }
+    
+    // 数字键 (0-9) - VK_0 = 0x30
+    if (keyName.length === 1 && /^[0-9]$/.test(keyName)) {
+        return keyName.charCodeAt(0);
+    }
+    
+    return keyMap[keyName] || null;
+}
+
+/**
+ * 将按键名称转换为 Electron globalShortcut 格式
+ */
+function getElectronAccelerator(keyName: string, modifiers: string[]): string {
+    // Electron 支持的修饰键
+    const electronModifiers = modifiers.map(mod => {
+        const lower = mod.toLowerCase();
+        if (lower === 'control' || lower === 'ctrl') return 'CommandOrControl';
+        if (lower === 'alt') return 'Alt';
+        if (lower === 'shift') return 'Shift';
+        if (lower === 'meta' || lower === 'windows' || lower === 'command') return 'Meta';
+        return null;
+    }).filter(Boolean);
+    
+    // 主键转换
+    let mainKey = keyName;
+    if (keyName === 'Space') mainKey = 'Space';
+    else if (keyName === 'Alt' || keyName === 'LeftAlt' || keyName === 'LAlt') {
+        // Alt 键在 Electron 中作为修饰键，但如果单独使用，也支持
+        mainKey = 'Alt';
+    }
+    else if (keyName.length === 1 && /^[A-Z]$/.test(keyName)) mainKey = keyName;
+    else if (keyName.length === 1 && /^[0-9]$/.test(keyName)) mainKey = keyName;
+    else if (keyName.startsWith('F') && /^\d+$/.test(keyName.slice(1))) mainKey = keyName; // F1-F12
+    else {
+        // 其他特殊键映射
+        const keyMap: { [key: string]: string } = {
+            'Enter': 'Return',
+            'Backspace': 'Backspace',
+            'Delete': 'Delete',
+            'Tab': 'Tab',
+            'Escape': 'Escape',
+            'Up': 'Up',
+            'Down': 'Down',
+            'Left': 'Left',
+            'Right': 'Right',
+            'Home': 'Home',
+            'End': 'End',
+            'PageUp': 'PageUp',
+            'PageDown': 'PageDown',
+            'Backquote': '`',
+            '`': '`',
+            'Grave': '`',
+        };
+        mainKey = keyMap[keyName] || keyName;
+    }
+    
+    // 组合成 accelerator 字符串
+    const parts = [...electronModifiers, mainKey];
+    return parts.join('+');
+}
+
+/**
+ * 初始化键盘监听（使用 Electron globalShortcut API）
+ */
+function initKeyboardListener(): void {
+    try {
+        // 尝试使用 Electron 的 globalShortcut API
+        const electron = require('electron');
+        
+        // 检查是否在 Electron 环境中
+        if (!electron.globalShortcut) {
+            throw new Error('Electron globalShortcut API 不可用');
+        }
+        
+        // 获取 accelerator 字符串
+        const accelerator = getElectronAccelerator(listenKey, keyModifiers);
+        logger.info('初始化键盘监听: %s', accelerator);
+        
+        // 注册全局快捷键：按下时开始监听，再次按下时停止监听（切换模式）
+        const registered = electron.globalShortcut.register(accelerator, () => {
+            if (!isListening) {
+                logger.info('🔔 按键按下，开始监听');
+                startListening().catch((err) => {
+                    logger.error('开始监听失败: %s', err.message);
+                });
+            } else {
+                // 如果正在监听，再次按下时停止监听
+                logger.info('🔇 按键再次按下，停止监听');
+                stopListening();
+            }
+        });
+        
+        if (!registered) {
+            throw new Error(`无法注册快捷键: ${accelerator}`);
+        }
+        
+        logger.info('✅ 键盘监听已启动（使用 Electron globalShortcut）');
+        logger.info('💡 提示：按住 %s 开始监听，再次按下停止监听', accelerator);
+        
+        iohook = { 
+            electron, 
+            accelerator, 
+            registered
+        };
+        
+    } catch (err: any) {
+        logger.error('初始化键盘监听失败: %s', err.message);
+        logger.debug('错误详情: %s', err.stack);
+        logger.warn('回退到 PowerShell 轮询方式');
+        
+        // 回退到 PowerShell 方案
+        initKeyboardListenerFallback();
+    }
+}
+
+/**
+ * 回退方案：使用 PowerShell 轮询（当 Electron 不可用时）
+ */
+function initKeyboardListenerFallback(): void {
+    if (process.platform !== 'win32') {
+        logger.warn('键盘监听功能目前仅支持 Windows 系统');
+        return;
+    }
+    
+    try {
+        const { spawn } = require('child_process');
+        const mainKeyCode = getVirtualKeyCode(listenKey);
+        if (!mainKeyCode) {
+            logger.error('不支持的按键: %s，请检查配置', listenKey);
+            return;
+        }
+        
+        const modifierCodes: number[] = [];
+        for (const mod of keyModifiers) {
+            const modCode = getVirtualKeyCode(mod);
+            if (modCode) modifierCodes.push(modCode);
+        }
+        
+        const modifiersStr = modifierCodes.length > 0 ? `@(${modifierCodes.join(', ')})` : '@()';
+        const psScript = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class KeyCheck {
+    [DllImport("user32.dll")]
+    public static extern short GetAsyncKeyState(int vKey);
+}
+"@
+$mainKey = ${mainKeyCode}
+$modifiers = ${modifiersStr}
+$checkInterval = 50
+while ($true) {
+    $mainState = [KeyCheck]::GetAsyncKeyState($mainKey)
+    $mainPressed = ($mainState -band 0x8000) -ne 0
+    $modifiersPressed = $true
+    if ($modifiers.Count -gt 0) {
+        foreach ($mod in $modifiers) {
+            $modState = [KeyCheck]::GetAsyncKeyState($mod)
+            if (($modState -band 0x8000) -eq 0) {
+                $modifiersPressed = $false
+                break
+            }
+        }
+    }
+    if ($mainPressed -and $modifiersPressed) {
+        Write-Host "KEY_DOWN"
+        Start-Sleep -Milliseconds $checkInterval
+        while ($true) {
+            $state = [KeyCheck]::GetAsyncKeyState($mainKey)
+            $stillPressed = ($state -band 0x8000) -ne 0
+            if (-not $stillPressed) {
+                Write-Host "KEY_UP"
+                break
+            }
+            Start-Sleep -Milliseconds $checkInterval
+        }
+    }
+    Start-Sleep -Milliseconds $checkInterval
+}
+`;
+        
+        const psProcess = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', psScript], {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
+        
+        let buffer = '';
+        psProcess.stdout.on('data', (data: Buffer) => {
+            buffer += data.toString();
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+                const trimmed = line.trim();
+                if (trimmed === 'KEY_DOWN' && !isListening) {
+                    logger.info('🔔 按键按下，开始监听');
+                    startListening().catch((err) => logger.error('开始监听失败: %s', err.message));
+                } else if (trimmed === 'KEY_UP' && isListening) {
+                    logger.info('🔇 按键松开，停止监听');
+                    stopListening();
+                }
+            }
+        });
+        
+        iohook = { process: psProcess };
+        logger.info('✅ 键盘监听已启动（使用 PowerShell 回退方案）');
+    } catch (err: any) {
+        logger.error('PowerShell 回退方案也失败: %s', err.message);
+    }
+}
+
+/**
+ * 开始监听（由键盘触发）
+ */
+async function startListening(): Promise<void> {
+    if (isListening) {
+        return;
+    }
+    
+    isListening = true;
+    
+    // 确保 ASR 连接已建立
+    if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+        try {
+            await connectRealtimeAsr();
+        } catch (err: any) {
+            logger.error('建立 ASR 连接失败: %s', err.message);
+            isListening = false;
+            return;
+        }
+    }
+    
+    // 清空之前的音频缓冲区
+    audioBuffer = [];
+    currentTranscription = '';
+    isCollecting = false;
+    
+    logger.info('🎤 开始语音监听');
+}
+
+/**
+ * 停止监听（由键盘触发）
+ */
+function stopListening(): void {
+    if (!isListening) {
+        return;
+    }
+    
+    isListening = false;
+    
+    // 停止收集
+    isCollecting = false;
+    
+    // 取消任何待处理的转录等待（避免超时错误）
+    // 如果后面有 completed 事件，它会自动发送
+    if (pendingTranscription) {
+        // 如果有待处理的转录，先检查是否已有结果
+        if (currentTranscription && currentTranscription.trim()) {
+            const text = currentTranscription.trim();
+            pendingTranscription(text);
+            pendingTranscription = null;
+            currentTranscription = '';
+            logger.info('停止监听，使用已有转录结果: %s', text);
+            sendTextToServer(text).catch((err) => {
+                logger.error('发送文本失败: %s', err.message);
+            });
+            // 清空音频缓冲区
+            audioBuffer = [];
+            logger.info('🔇 停止语音监听');
+            return;
+        } else {
+            // 取消待处理的转录（设置为空字符串，避免超时错误）
+            pendingTranscription('');
+            pendingTranscription = null;
+            logger.debug('停止监听，取消待处理的转录等待');
+        }
+    }
+    
+    // 检查是否已有待处理的转录结果（可能在 completed 事件中已经设置）
+    if (currentTranscription && currentTranscription.trim()) {
+        const text = currentTranscription.trim();
+        logger.info('停止监听，使用已有转录结果: %s', text);
+        currentTranscription = '';
+        sendTextToServer(text).catch((err) => {
+            logger.error('发送文本失败: %s', err.message);
+        });
+        // 清空音频缓冲区
+        audioBuffer = [];
+        logger.info('🔇 停止语音监听');
+        return;
+    }
+    
+    // 如果刚刚完成了一次转录（500ms内），不应该再发送新的音频
+    const timeSinceLastCompleted = Date.now() - lastCompletedTime;
+    if (timeSinceLastCompleted < 500) {
+        logger.debug('停止监听，刚刚完成转录，跳过发送新音频');
+        audioBuffer = [];
+        logger.info('🔇 停止语音监听');
+        return;
+    }
+    
+    // 如果没有转录结果，且没有音频数据，直接返回
+    if (audioBuffer.length === 0) {
+        logger.debug('停止监听，没有音频数据');
+        audioBuffer = [];
+        logger.info('🔇 停止语音监听');
+        return;
+    }
+    
+    // 如果正在等待转录，且没有新的音频数据，不应该重复发送
+    if (isWaitingForTranscription) {
+        logger.debug('停止监听，正在等待转录完成，跳过重复发送');
+        audioBuffer = [];
+        logger.info('🔇 停止语音监听');
+        return;
+    }
+    
+    // 如果有音频数据但没有转录结果，发送并等待转录
+    logger.info('停止监听，发送已收集的音频');
+    sendCollectedAudio().catch((err) => {
+        logger.error('发送音频失败: %s', err.message);
+    });
+    
+    // 注意：不清空 audioBuffer，让 sendCollectedAudio 处理完后再清空
+    
+    logger.info('🔇 停止语音监听');
+}
+
+/**
  * 发送转录文本到服务器进行 AI 对话
  */
-async function sendTextToServer(text: string) {
+async function sendTextToServer(text: string, isSystemMessage = false) {
     const voiceClient = getVoiceClient();
     if (!voiceClient) {
         logger.warn('VoiceClient 未初始化，无法发送文本');
@@ -474,7 +884,13 @@ async function sendTextToServer(text: string) {
 
     try {
         ws.send(JSON.stringify(message));
-        logger.info('已发送转录文本到服务器进行 AI 对话: %s', text);
+        if (isSystemMessage) {
+            logger.info('已发送系统消息: %s', text);
+        } else {
+            logger.info('已发送转录文本到服务器进行 AI 对话: %s', text);
+        }
+        
+        // 消息已发送
     } catch (e: any) {
         logger.error('发送文本失败: %s', e.message);
     }
@@ -502,21 +918,41 @@ async function sendCollectedAudio() {
         }
 
         // 提交并等待转录（音频已经在实时发送时发送过了）
-        const transcribedText = await commitAndWaitTranscription();
+        // 但在 VAD 模式下，可能在调用 commitAndWaitTranscription 之前已经收到 completed 事件
+        // 如果已经有转录结果，直接使用它
+        let transcribedText: string;
+        if (currentTranscription && currentTranscription.trim()) {
+            // 已经有转录结果（可能是刚才收到的 completed 事件）
+            transcribedText = currentTranscription.trim();
+            currentTranscription = ''; // 清空，避免重复使用
+            logger.debug('[实时ASR] 使用已完成的转录结果: %s', transcribedText);
+        } else {
+            // 等待新的转录结果
+            transcribedText = await commitAndWaitTranscription();
+        }
         
         if (transcribedText && transcribedText.trim()) {
-            // 发送转录文本到服务器
-            await sendTextToServer(transcribedText);
+            const text = transcribedText.trim();
+            // 发送转录文本到服务器进行对话
+            await sendTextToServer(text);
         } else {
             logger.warn('[实时ASR] 转录结果为空，跳过发送');
         }
 
     } catch (err: any) {
+        // 如果是超时错误，且已有转录文本，尝试使用它
+        if (err.message.includes('转录超时') && currentTranscription && currentTranscription.trim()) {
+            const text = currentTranscription.trim();
+            logger.info('[实时ASR] 转录超时，但使用已有转录文本: %s', text);
+            currentTranscription = '';
+            await sendTextToServer(text);
+            return;
+        }
         logger.error('处理音频失败: %s', err.message);
     } finally {
         // 清空缓冲区
         audioBuffer = [];
-        currentTranscription = '';
+        // 注意：不清空 currentTranscription，因为它可能在 completed 事件中已经被使用或清空
     }
 }
 
@@ -624,16 +1060,10 @@ async function startAutoVoiceMonitoring() {
         ];
     }
 
-    logger.info('开始自动语音监听...');
+    logger.info('开始语音监听服务（等待按键触发）...');
     isMonitoring = true;
     
-    // 预先建立 ASR 连接，避免检测到声音时延迟
-    if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
-        logger.debug('预先建立实时 ASR 连接...');
-        connectRealtimeAsr().catch((err) => {
-            logger.warn('预先建立 ASR 连接失败，将在检测到声音时重试: %s', err.message);
-        });
-    }
+    // 不预先建立 ASR 连接，等待按键触发时再建立
     
     recordingProcess = spawn(command, args);
 
@@ -649,6 +1079,11 @@ async function startAutoVoiceMonitoring() {
                 // 检测到声音
                 lastSoundTime = now;
                 
+                // 只在按键按下时才处理音频
+                if (!isListening) {
+                    return; // 按键未按下，忽略音频
+                }
+                
                 if (!isCollecting) {
                     // 开始收集音频
                     isCollecting = true;
@@ -657,7 +1092,7 @@ async function startAutoVoiceMonitoring() {
                     recordingStartTime = now;
                     logger.info('检测到声音，开始录音 - 音量: %.2f dB', volume);
                     
-                    // 确保实时 ASR 连接已建立（如果还没建立，尝试建立）
+                    // 确保实时 ASR 连接已建立
                     if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
                         logger.debug('ASR 连接未就绪，尝试建立连接...');
                         connectRealtimeAsr().catch((err) => {
@@ -778,7 +1213,10 @@ export async function apply(ctx: Context) {
                     connectionCheckInterval = null;
                 }
                 hasStarted = true;
-                logger.info('上游连接已建立，开始初始化音频监听...');
+                logger.info('上游连接已建立，开始初始化语音监听服务...');
+                
+                // 初始化键盘监听
+                initKeyboardListener();
                 
                 // 延迟一小段时间确保连接稳定
                 setTimeout(async () => {
@@ -808,6 +1246,35 @@ export async function apply(ctx: Context) {
             } catch { /* ignore */ }
             realtimeAsrWs = null;
         }
+        
+        // 停止键盘监听
+        if (iohook) {
+            try {
+                if (iohook.electron && iohook.registered) {
+                    // 使用 Electron globalShortcut
+                    iohook.electron.globalShortcut.unregister(iohook.accelerator);
+                    iohook.electron.globalShortcut.unregisterAll();
+                }
+                if (iohook.checkInterval) {
+                    clearInterval(iohook.checkInterval);
+                }
+                if (iohook.process) {
+                    iohook.process.kill();
+                }
+                iohook = null;
+                logger.info('键盘监听已停止');
+            } catch (err: any) {
+                logger.error('停止键盘监听失败: %s', err.message);
+            }
+        }
+        
+        // 停止监听（如果正在监听）
+        if (isListening) {
+            stopListening();
+        }
+        
+        // 清理修饰键状态
+        pressedModifiers.clear();
         
         // 清理状态
         isRealtimeAsrActive = false;

@@ -1153,7 +1153,7 @@ export class VoiceClient extends EventEmitter {
         this.streamingAudioChunks = [];
         this.isStreamingAudio = false;
         
-        // 优先使用 Web 音频播放器（client 模式下通过 audio-player-server）
+        // 只使用 Web 音频播放器（client 模式下通过 audio-player-server）
         try {
             const { isPlayerConnected } = require('./audio-player-server');
             if (isPlayerConnected && isPlayerConnected()) {
@@ -1162,233 +1162,35 @@ export class VoiceClient extends EventEmitter {
                 return;
             }
         } catch (err: any) {
-            // audio-player-server 可能未初始化，忽略错误
+            // audio-player-server 可能未初始化
             logger.debug('无法检查音频播放器状态: %s', err.message);
         }
         
-        // 回退到本地播放
+        // Web 播放器不可用，只记录警告，不初始化本地播放
+        logger.warn('⚠️  Web 音频播放器未连接，音频播放将被跳过。请确保客户端已启动并打开播放器页面。');
         this.useWebAudioPlayer = false;
-        
-        // 创建临时文件用于存储流式音频
-        this.streamingAudioFile = path.join(os.tmpdir(), `streaming-audio-${Date.now()}.pcm`);
-        
-        // 确保文件存在
-        fs.writeFileSync(this.streamingAudioFile, Buffer.alloc(0));
-        
-        // 启动播放进程（使用 ffplay 或 ffmpeg）
-        const platform = os.platform();
-        const sampleRate = 24000; // TTS 使用 24kHz
-        
-        if (platform === 'win32') {
-            // Windows: 优先尝试使用 ffplay 管道方式实现真正的流式播放
-            const ffplayPath = getFfplayPath();
-            if (ffplayPath) {
-                logger.info('找到 ffplay，使用流式管道播放: %s', ffplayPath);
-                try {
-                    this.streamingAudioProcess = spawn(ffplayPath, [
-                        '-nodisp',
-                        '-autoexit',
-                        '-loglevel', 'quiet',
-                        '-f', 's16le',
-                        '-ar', sampleRate.toString(),
-                        '-ac', '1',
-                        '-i', 'pipe:0'
-                    ], {
-                        stdio: ['pipe', 'ignore', 'ignore']
-                    });
-                    
-                    // 设置错误处理
-                    this.streamingAudioProcess.on('error', (err) => {
-                        logger.warn('ffplay 管道播放失败，切换到文件方式: %s', err.message);
-                        // 如果管道播放失败，切换到文件方式
-                        this.streamingAudioProcess = null;
-                    });
-                    
-                    this.streamingAudioProcess.on('close', () => {
-                        this.cleanupStreamingAudio();
-                    });
-                    
-                    this.isStreamingAudio = true; // 标记为已启动
-                } catch (err: any) {
-                    logger.warn('无法启动 ffplay 管道播放，使用文件方式: %s', err.message);
-                    this.streamingAudioProcess = null;
-                }
-            } else {
-                // ffplay 不可用，使用文件方式（将在 playAudioChunk 中启动）
-                logger.debug('未找到 ffplay，将使用文件方式播放（延迟稍高但功能正常）');
-                this.streamingAudioProcess = null;
-            }
-        } else {
-            // Linux/macOS: 使用 ffplay 或 aplay
-            if (platform === 'linux') {
-                // Linux: 使用 ffplay 或 aplay
-                const ffplayPath = getFfplayPath();
-                if (ffplayPath) {
-                    this.streamingAudioProcess = spawn(ffplayPath, [
-                        '-nodisp',
-                        '-autoexit',
-                        '-loglevel', 'quiet',
-                        '-f', 's16le',
-                        '-ar', sampleRate.toString(),
-                        '-ac', '1',
-                        '-i', 'pipe:0'
-                    ], {
-                        stdio: ['pipe', 'ignore', 'ignore']
-                    });
-                } else {
-                    // 如果 ffplay 不可用，使用 aplay
-                    this.streamingAudioProcess = spawn('aplay', [
-                        '-f', 'S16_LE',
-                        '-r', sampleRate.toString(),
-                        '-c', '1'
-                    ], {
-                        stdio: ['pipe', 'ignore', 'ignore']
-                    });
-                }
-            } else {
-                // macOS: 使用 ffplay 或 afplay（通过临时文件）
-                const ffplayPath = getFfplayPath();
-                if (ffplayPath) {
-                    this.streamingAudioProcess = spawn(ffplayPath, [
-                        '-nodisp',
-                        '-autoexit',
-                        '-loglevel', 'quiet',
-                        '-f', 's16le',
-                        '-ar', sampleRate.toString(),
-                        '-ac', '1',
-                        '-i', 'pipe:0'
-                    ], {
-                        stdio: ['pipe', 'ignore', 'ignore']
-                    });
-                } else {
-                    // macOS 无法直接从管道播放，使用文件方式
-                    // 将在 playAudioChunk 中实现
-                }
-            }
-            
-            if (this.streamingAudioProcess) {
-                this.streamingAudioProcess.on('error', (err) => {
-                    logger.error('流式音频播放进程错误: %s', err.message);
-                    this.cleanupStreamingAudio();
-                });
-                
-                this.streamingAudioProcess.on('close', () => {
-                    this.cleanupStreamingAudio();
-                });
-            }
-        }
     }
 
     /**
      * 播放音频分片（流式）
      */
     private async playAudioChunk(chunkBase64: string): Promise<void> {
-        // 如果使用 Web 音频播放器，直接转发（client 模式）
+        // 只使用 Web 音频播放器，不进行本地播放回退
         if (this.useWebAudioPlayer) {
             try {
                 const { forwardAudioChunk } = require('./audio-player-server');
                 if (forwardAudioChunk && forwardAudioChunk(chunkBase64)) {
                     logger.debug('音频分片已转发到 Web 播放器: %d bytes', chunkBase64 ? chunkBase64.length : 0);
-                    return; // 成功转发，不需要本地播放
+                    return; // 成功转发
                 } else {
-                    // 转发失败，切换到本地播放
-                    logger.warn('Web 音频播放器转发失败，切换到本地播放');
-                    this.useWebAudioPlayer = false;
+                    logger.warn('Web 音频播放器转发失败，音频将被丢弃');
                 }
             } catch (err: any) {
-                // audio-player-server 可能未初始化，切换到本地播放
-                logger.debug('音频播放器转发失败: %s', err.message);
-                this.useWebAudioPlayer = false;
+                logger.warn('音频播放器转发异常: %s', err.message);
             }
-        }
-        
-        if (!this.streamingAudioFile && !this.streamingAudioProcess) {
-            // 如果播放器未初始化，初始化它
-            this.initStreamingPlayback();
-        }
-        
-        try {
-            // 解码 base64
-            const chunkBuffer = Buffer.from(chunkBase64, 'base64');
-            
-            // 直接写入播放进程的 stdin（如果支持） - 真正的流式播放
-            if (this.streamingAudioProcess && this.streamingAudioProcess.stdin) {
-                try {
-                    // 检查管道是否可写
-                    if (!this.streamingAudioProcess.stdin.destroyed && this.streamingAudioProcess.stdin.writable) {
-                        const canWrite = this.streamingAudioProcess.stdin.write(chunkBuffer);
-                        this.isStreamingAudio = true;
-                        // 如果缓冲区满了，等待 drain 事件（但继续处理下一个块）
-                        if (!canWrite) {
-                            this.streamingAudioProcess.stdin.once('drain', () => {
-                                // 缓冲区已清空，可以继续写入
-                            });
-                        }
-                    } else {
-                        // 管道已关闭，切换到文件方式
-                        throw new Error('管道已关闭');
-                    }
-                } catch (err: any) {
-                    // 如果写入失败（管道已关闭或错误），使用文件方式作为后备
-                    if (this.streamingAudioFile) {
-                        fs.appendFileSync(this.streamingAudioFile, chunkBuffer);
-                        this.streamingAudioChunks.push(chunkBuffer);
-                    }
-                    
-                    // 关闭管道播放进程（如果还存在）
-                    if (this.streamingAudioProcess && this.streamingAudioProcess.stdin) {
-                        try {
-                            this.streamingAudioProcess.stdin.end();
-                            this.streamingAudioProcess.kill();
-                        } catch { /* ignore */ }
-                        this.streamingAudioProcess = null;
-                    }
-                    
-                    // 切换到文件方式播放（延迟启动，确保有足够数据）
-                    if (!this.isStreamingAudio && this.streamingAudioFile) {
-                        // 延迟启动，确保有足够数据以减少卡顿
-                        if (this.streamingAudioChunks.length >= 3) {
-                            this.startStreamingPlaybackFromFile();
-                        } else {
-                            // 设置定时器，在 200ms 后启动
-                            if (!this.streamingPlaybackTimer) {
-                                this.streamingPlaybackTimer = setTimeout(() => {
-                                    if (!this.isStreamingAudio && this.streamingAudioChunks.length > 0) {
-                                        this.startStreamingPlaybackFromFile();
-                                    }
-                                    this.streamingPlaybackTimer = null;
-                                }, 200);
-                            }
-                        }
-                    }
-                }
-            } else {
-                // 使用文件方式：追加到临时文件
-                if (this.streamingAudioFile) {
-                    fs.appendFileSync(this.streamingAudioFile, chunkBuffer);
-                    this.streamingAudioChunks.push(chunkBuffer);
-                    
-                    // 延迟启动，确保有足够数据以减少卡顿
-                    if (!this.isStreamingAudio) {
-                        // 等待至少 5 个块或 300ms 后启动
-                        if (this.streamingAudioChunks.length >= 5) {
-                            this.startStreamingPlaybackFromFile();
-                        } else {
-                            if (!this.streamingPlaybackTimer) {
-                                this.streamingPlaybackTimer = setTimeout(() => {
-                                    if (!this.isStreamingAudio && this.streamingAudioChunks.length > 0) {
-                                        this.startStreamingPlaybackFromFile();
-                                    }
-                                    this.streamingPlaybackTimer = null;
-                                }, 300);
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (err: any) {
-            logger.error('处理音频分片失败: %s', err.message);
-            throw err;
+        } else {
+            // Web 播放器未连接，只记录调试信息，不播放
+            logger.debug('Web 音频播放器未连接，音频分片被跳过');
         }
     }
 
@@ -1556,7 +1358,7 @@ export class VoiceClient extends EventEmitter {
      * 完成流式播放
      */
     private finalizeStreamingPlayback(): void {
-        // 如果使用 Web 音频播放器，发送完成信号（client 模式）
+        // 只使用 Web 音频播放器，发送完成信号
         if (this.useWebAudioPlayer) {
             try {
                 const { sendPlaybackDone } = require('./audio-player-server');
@@ -1564,53 +1366,15 @@ export class VoiceClient extends EventEmitter {
                     sendPlaybackDone();
                 }
             } catch (err: any) {
-                // audio-player-server 可能未初始化，忽略错误
                 logger.debug('发送播放完成信号失败: %s', err.message);
             }
             this.useWebAudioPlayer = false;
             return;
         }
         
-        // 清除启动定时器
-        if (this.streamingPlaybackTimer) {
-            clearTimeout(this.streamingPlaybackTimer);
-            this.streamingPlaybackTimer = null;
-        }
-        
-        // 如果使用文件方式但还没启动播放，立即启动
-        if (this.streamingAudioFile && !this.isStreamingAudio && this.streamingAudioChunks.length > 0) {
-            this.startStreamingPlaybackFromFile();
-        }
-        
-        // 关闭 stdin（如果使用管道）
-        if (this.streamingAudioProcess && this.streamingAudioProcess.stdin) {
-            try {
-                // 等待数据写入完成后再关闭
-                if (this.streamingAudioProcess.stdin.writable) {
-                    this.streamingAudioProcess.stdin.end();
-                }
-            } catch { /* ignore */ }
-        }
-        
-        // 如果使用文件方式，等待播放完成
-        // 注意：Windows 上的播放是在后台异步进行的，所以这里不立即清理
-        // 清理会在播放进程结束时自动触发
-        if (this.streamingAudioFile && this.isStreamingAudio) {
-            // Windows 上的播放是异步的，不需要等待
-            // 但如果播放进程还没启动，等待一下让它启动
-            if (!this.streamingAudioProcess) {
-                // 如果播放还没启动，等待 2 秒后清理（给时间启动）
-                setTimeout(() => {
-                    // 不清理，让播放进程自己清理
-                }, 2000);
-            }
-            // 否则等待播放进程结束（已经在进程的 close 事件中清理）
-        } else {
-            // 等待一小段时间后清理（给进程时间退出）
-            setTimeout(() => {
-                this.cleanupStreamingAudio();
-            }, 1000);
-        }
+        // Web 播放器未连接，只记录调试信息，清理状态
+        logger.debug('Web 音频播放器未连接，播放完成');
+        this.cleanupStreamingAudio();
     }
 
     /**

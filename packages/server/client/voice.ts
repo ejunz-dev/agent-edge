@@ -4,6 +4,9 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as http from 'http';
+import * as https from 'https';
+import { URL } from 'url';
 
 const logger = new Logger('voice-client');
 
@@ -396,7 +399,7 @@ export class VoiceClient extends EventEmitter {
                     this.emit('transcription', msg.result.text);
                 }
             } else if (msg.key === 'voice_chat_audio') {
-                // 处理流式音频分片
+                // 处理流式音频分片（旧模式，兼容）
                 if (msg.chunk) {
                     this.playAudioChunk(msg.chunk).catch((e) => {
                         logger.error('播放音频分片失败: %s', e.message);
@@ -405,6 +408,16 @@ export class VoiceClient extends EventEmitter {
                 } else if (msg.done) {
                     // 流式传输完成
                     this.finalizeStreamingPlayback();
+                }
+            } else if (msg.key === 'voice_chat_audio_cache') {
+                // 处理缓存模式音频
+                const { audioId, url } = msg;
+                if (audioId && url) {
+                    logger.info('收到音频缓存请求: %s', audioId);
+                    this.fetchAudioFromCache(url).catch((e) => {
+                        logger.error('拉取音频缓存失败: %s', e.message);
+                        this.emit('error', e);
+                    });
                 }
             } else if (msg.key === 'voice_tts') {
                 if (msg.error) {
@@ -1366,6 +1379,94 @@ export class VoiceClient extends EventEmitter {
         // Web 播放器不可用，只记录警告，不初始化本地播放
         logger.warn('⚠️  Web 音频播放器未连接，音频播放将被跳过。请确保客户端已启动并打开播放器页面。');
         this.useWebAudioPlayer = false;
+    }
+
+    /**
+     * 从缓存拉取音频并流式播放
+     */
+    private async fetchAudioFromCache(url: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            try {
+                logger.info('开始HTTP拉取音频: %s', url);
+                
+                // 解析URL
+                const urlObj = new URL(url);
+                const isHttps = urlObj.protocol === 'https:';
+                const client = isHttps ? https : http;
+                
+                // 初始化流式播放器（如果还没有初始化）
+                if (!this.isStreamingAudio) {
+                    this.initStreamingPlayback();
+                }
+                
+                let buffer = Buffer.alloc(0);
+                
+                // 发起HTTP请求
+                const req = client.get(url, (res) => {
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`HTTP错误: ${res.statusCode} ${res.statusMessage}`));
+                        return;
+                    }
+                    
+                    // 流式读取数据
+                    res.on('data', (chunk: Buffer) => {
+                        // 合并数据
+                        buffer = Buffer.concat([buffer, chunk]);
+                        
+                        // 每次读取到一定大小（4096字节）后播放一个chunk
+                        const chunkSize = 4096;
+                        while (buffer.length >= chunkSize) {
+                            const audioChunk = buffer.slice(0, chunkSize);
+                            buffer = buffer.slice(chunkSize);
+                            
+                            // 转换为base64并播放
+                            const base64Chunk = audioChunk.toString('base64');
+                            
+                            // 立即播放（这会发送到Web播放器）
+                            this.playAudioChunk(base64Chunk).catch((e) => {
+                                logger.warn('播放音频分片失败: %s', e.message);
+                            });
+                        }
+                    });
+                    
+                    res.on('end', () => {
+                        // 处理剩余数据
+                        if (buffer.length > 0) {
+                            // 确保是偶数长度（PCM16需要2字节对齐）
+                            const alignedLength = buffer.length % 2 === 0 ? buffer.length : buffer.length - 1;
+                            if (alignedLength > 0) {
+                                const finalChunk = buffer.slice(0, alignedLength);
+                                const base64Chunk = finalChunk.toString('base64');
+                                this.playAudioChunk(base64Chunk).catch((e) => {
+                                    logger.warn('播放最后音频分片失败: %s', e.message);
+                                });
+                            }
+                        }
+                        
+                        logger.info('音频拉取完成');
+                        
+                        // 等待播放完成
+                        setTimeout(() => {
+                            this.finalizeStreamingPlayback();
+                            resolve();
+                        }, 500);
+                    });
+                    
+                    res.on('error', (err) => {
+                        logger.error('拉取音频缓存失败: %s', err.message);
+                        reject(err);
+                    });
+                });
+                
+                req.on('error', (err) => {
+                    logger.error('HTTP请求失败: %s', err.message);
+                    reject(err);
+                });
+            } catch (error: any) {
+                logger.error('拉取音频缓存失败: %s', error.message);
+                reject(error);
+            }
+        });
     }
 
     /**

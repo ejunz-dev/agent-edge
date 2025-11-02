@@ -276,10 +276,19 @@ export class AsrProxyConnectionHandler extends ConnectionHandler<Context> {
         }
     }
 
+    private isProcessingAiRequest = false; // 防止重复处理
+    
     /**
      * 处理转录完成：server自动转发到AI API
      */
     private async handleTranscriptionComplete(text: string) {
+        // 防止重复处理
+        if (this.isProcessingAiRequest) {
+            logger.warn('[ASR代理] 已有AI请求在处理中，跳过重复请求: %s', text);
+            return;
+        }
+        
+        this.isProcessingAiRequest = true;
         try {
             // 找到关联的client connection（通过IP地址匹配）
             const clientIp = this.request?.ip || (this.request as any)?.socket?.remoteAddress;
@@ -316,60 +325,179 @@ export class AsrProxyConnectionHandler extends ConnectionHandler<Context> {
             
             logger.info('[ASR代理] 自动转发转录文本到AI: %s', text);
             
-            // 调用AI对话
-            const aiResponse = await voiceService.chat(text, conversationHistory);
-            
-            // 更新对话历史
-            if (!(clientConn as any).conversationHistory) {
-                (clientConn as any).conversationHistory = [];
-            }
-            (clientConn as any).conversationHistory.push({ role: 'user', content: text });
-            (clientConn as any).conversationHistory.push({ role: 'assistant', content: aiResponse });
-            // 只保留最近20条
-            if ((clientConn as any).conversationHistory.length > 20) {
-                (clientConn as any).conversationHistory = (clientConn as any).conversationHistory.slice(-20);
-            }
-            
-            // 检查是否使用realtime TTS
+            // 检查是否使用realtime TTS和WebSocket AI
             const voiceConfig = (config as any).voice || {};
             const ttsConfig = voiceConfig.tts || {};
             const model = ttsConfig.model || 'qwen3-tts-flash';
+            const aiConfig = voiceConfig.ai || {};
+            const endpoint = aiConfig.endpoint || '';
+            const isWebSocket = endpoint.startsWith('ws://') || endpoint.startsWith('wss://');
             
-            if (model.includes('realtime')) {
-                // 使用流式TTS
-                logger.info('[ASR代理] 使用流式TTS模式');
+            if (model.includes('realtime') && isWebSocket) {
+                // 使用流式AI+TTS：收到内容立即播放
+                logger.info('[ASR代理] 使用流式AI+TTS模式');
                 
-                // 先发送文本和AI回复
+                let fullAiResponse = '';
+                
+                // 先发送初始消息
                 clientConn.send({
                     key: 'voice_chat',
                     result: {
                         text: text,
-                        aiResponse: aiResponse,
-                        audio: null,
-                        streaming: true,
+                        aiResponse: '', // 初始为空，后续通过流式更新
+                        audio: null, // 音频将通过流式分片发送
+                        streaming: true, // 标识这是流式传输
                     },
                 });
                 
-                // 然后流式发送音频
                 try {
-                    await (voiceService as any).streamTtsRealtime(
-                        aiResponse,
-                        { ...ttsConfig, voice: ttsConfig.voice || 'Cherry' },
+                    // 直接通过WebSocket流式发送音频，不使用HTTP缓存
+                    const result = await (voiceService as any).chatStreamWithTts(
+                        text,
+                        conversationHistory,
+                        // onAudioChunk: 直接通过WebSocket发送音频分片
                         (audioChunk: Buffer) => {
                             clientConn.send({
                                 key: 'voice_chat_audio',
                                 chunk: audioChunk.toString('base64'),
                             });
-                        }
+                        },
+                        // onTextChunk: 更新文本内容
+                        (textChunk: string) => {
+                            fullAiResponse += textChunk;
+                            // 实时更新AI回复（用于显示）
+                            clientConn.send({
+                                key: 'voice_chat_text',
+                                chunk: textChunk,
+                                fullText: fullAiResponse,
+                            });
+                        },
+                        false // 不使用缓存模式，直接流式发送
                     );
                     
-                    // 发送流式传输完成信号
+                    // 处理返回结果
+                    let finalText: string;
+                    if (typeof result === 'string') {
+                        finalText = result;
+                    } else {
+                        finalText = result.text;
+                    }
+                    
+                    // 发送音频流完成信号
                     clientConn.send({
                         key: 'voice_chat_audio',
                         done: true,
                     });
+                    
+                    // 更新最终回复
+                    clientConn.send({
+                        key: 'voice_chat',
+                        result: {
+                            text: text,
+                            aiResponse: fullAiResponse,
+                            streaming: false,
+                        },
+                    });
+                    
+                    // 更新对话历史
+                    if (!(clientConn as any).conversationHistory) {
+                        (clientConn as any).conversationHistory = [];
+                    }
+                    (clientConn as any).conversationHistory.push({ role: 'user', content: text });
+                    (clientConn as any).conversationHistory.push({ role: 'assistant', content: fullAiResponse });
+                    if ((clientConn as any).conversationHistory.length > 20) {
+                        (clientConn as any).conversationHistory = (clientConn as any).conversationHistory.slice(-20);
+                    }
+                    
+                    this.isProcessingAiRequest = false; // 请求完成，重置标志
                 } catch (e: any) {
-                    logger.error('[ASR代理] 流式TTS失败，回退到非流式模式: %s', e.message);
+                    this.isProcessingAiRequest = false; // 请求失败，重置标志
+                    logger.error('[ASR代理] 流式AI+TTS失败，回退到非流式模式: %s', e.message);
+                    // 回退到非流式模式
+                    const aiResponse = await voiceService.chat(text, conversationHistory);
+                    const audioBuffer = await voiceService.tts(aiResponse);
+                    clientConn.send({
+                        key: 'voice_chat',
+                        result: {
+                            text: text,
+                            audio: audioBuffer.toString('base64'),
+                            aiResponse: aiResponse,
+                        },
+                    });
+                    
+                    // 更新对话历史
+                    if (!(clientConn as any).conversationHistory) {
+                        (clientConn as any).conversationHistory = [];
+                    }
+                    (clientConn as any).conversationHistory.push({ role: 'user', content: text });
+                    (clientConn as any).conversationHistory.push({ role: 'assistant', content: aiResponse });
+                    if ((clientConn as any).conversationHistory.length > 20) {
+                        (clientConn as any).conversationHistory = (clientConn as any).conversationHistory.slice(-20);
+                    }
+                }
+            } else {
+                // 非流式模式：等待完整回复后播放
+                const aiResponse = await voiceService.chat(text, conversationHistory);
+                
+                this.isProcessingAiRequest = false; // 请求完成，重置标志
+                
+                // 更新对话历史
+                if (!(clientConn as any).conversationHistory) {
+                    (clientConn as any).conversationHistory = [];
+                }
+                (clientConn as any).conversationHistory.push({ role: 'user', content: text });
+                (clientConn as any).conversationHistory.push({ role: 'assistant', content: aiResponse });
+                if ((clientConn as any).conversationHistory.length > 20) {
+                    (clientConn as any).conversationHistory = (clientConn as any).conversationHistory.slice(-20);
+                }
+                
+                if (model.includes('realtime')) {
+                    // 使用流式TTS
+                    logger.info('[ASR代理] 使用流式TTS模式');
+                    
+                    // 先发送文本和AI回复
+                    clientConn.send({
+                        key: 'voice_chat',
+                        result: {
+                            text: text,
+                            aiResponse: aiResponse,
+                            audio: null,
+                            streaming: true,
+                        },
+                    });
+                    
+                    // 然后流式发送音频
+                    try {
+                        await (voiceService as any).streamTtsRealtime(
+                            aiResponse,
+                            { ...ttsConfig, voice: ttsConfig.voice || 'Cherry' },
+                            (audioChunk: Buffer) => {
+                                clientConn.send({
+                                    key: 'voice_chat_audio',
+                                    chunk: audioChunk.toString('base64'),
+                                });
+                            }
+                        );
+                        
+                        // 发送流式传输完成信号
+                        clientConn.send({
+                            key: 'voice_chat_audio',
+                            done: true,
+                        });
+                    } catch (e: any) {
+                        logger.error('[ASR代理] 流式TTS失败，回退到非流式模式: %s', e.message);
+                        const audioBuffer = await voiceService.tts(aiResponse);
+                        clientConn.send({
+                            key: 'voice_chat',
+                            result: {
+                                text: text,
+                                audio: audioBuffer.toString('base64'),
+                                aiResponse: aiResponse,
+                            },
+                        });
+                    }
+                } else {
+                    // 非流式TTS
                     const audioBuffer = await voiceService.tts(aiResponse);
                     clientConn.send({
                         key: 'voice_chat',
@@ -380,17 +508,6 @@ export class AsrProxyConnectionHandler extends ConnectionHandler<Context> {
                         },
                     });
                 }
-            } else {
-                // 非流式TTS
-                const audioBuffer = await voiceService.tts(aiResponse);
-                clientConn.send({
-                    key: 'voice_chat',
-                    result: {
-                        text: text,
-                        audio: audioBuffer.toString('base64'),
-                        aiResponse: aiResponse,
-                    },
-                });
             }
         } catch (err: any) {
             logger.error('[ASR代理] 自动转发转录文本到AI失败: %s', err.message);

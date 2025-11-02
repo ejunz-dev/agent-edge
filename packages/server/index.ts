@@ -36,6 +36,7 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/client')),
             c.plugin(require('./handler/asr-proxy')),
             c.plugin(require('./handler/audio-player')),
+            c.plugin(require('./handler/audio-cache')),
         ]);
         c.server.listen();
     });

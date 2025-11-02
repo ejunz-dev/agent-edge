@@ -193,7 +193,8 @@ const connectWebSocket = () => {
 
 // 处理WebSocket消息
 const handleWebSocketMessage = (data: any) => {
-    console.log('收到消息:', data);
+    const msgKey = data.key || data.type || 'unknown';
+    console.log('[WebSocket] 收到消息:', msgKey, data);
 
     // 处理连接成功消息
     if (data.hello === 'edge') {
@@ -252,14 +253,36 @@ const handleWebSocketMessage = (data: any) => {
             currentTranscript.value = '';
         }
     } else if (data.key === 'voice_chat_audio') {
-        // 处理流式音频分片
+        // 处理流式音频分片（通过WebSocket直接发送）
         if (data.chunk) {
+            // 初始化流式播放器（如果还没有初始化）
+            if (!streamingAudioContext) {
+                console.log('[流式播放] 初始化流式播放器');
+                initStreamingPlayback();
+            }
             // 接收到音频分片，立即播放
             playAudioChunk(data.chunk);
         } else if (data.done) {
             // 流式传输完成
             finalizeStreamingPlayback();
             console.log('[流式播放] 音频流传输完成');
+        }
+    } else if (data.key === 'voice_chat_audio_cache') {
+        // 处理缓存模式音频
+        const { audioId, url } = data;
+        if (audioId && url) {
+            console.log('[音频缓存] 收到缓存请求:', { audioId, url });
+            // 初始化流式播放器（如果还没有初始化）
+            if (!streamingAudioContext) {
+                initStreamingPlayback();
+            }
+            // 从服务器拉取音频并流式播放
+            fetchAudioFromCache(url).catch((e) => {
+                console.error('[音频缓存] 拉取失败:', e);
+                error.value = `音频拉取失败: ${e.message}`;
+            });
+        } else {
+            console.warn('[音频缓存] 缺少必要参数:', { audioId, url });
         }
     } else if (data.key === 'voice_asr' && data.result) {
         currentTranscript.value = data.result.text;
@@ -732,16 +755,30 @@ const playAudioChunk = (audioBase64: string) => {
 
         // 确保字节数是偶数（PCM16需要2字节对齐）
         if (bytes.length % 2 !== 0) {
+            console.warn('[流式播放] 音频数据长度不是偶数，丢弃最后一个字节');
             bytes = bytes.slice(0, bytes.length - 1);
         }
+        
+        if (bytes.length === 0) {
+            console.warn('[流式播放] 音频数据为空，跳过');
+            return;
+        }
 
-        // 转换为Int16Array
-        const pcmData = new Int16Array(bytes.buffer);
+        // 转换为Int16Array（使用DataView确保字节序正确，小端序）
+        const sampleCount = bytes.length / 2;
+        const pcmData = new Int16Array(sampleCount);
+        const dataView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let i = 0; i < sampleCount; i++) {
+            // 小端序读取Int16
+            pcmData[i] = dataView.getInt16(i * 2, true);
+        }
         
         // 转换为Float32（-1.0到1.0）
-        const floatData = new Float32Array(pcmData.length);
-        for (let i = 0; i < pcmData.length; i++) {
-            floatData[i] = pcmData[i] / 32768.0;
+        // 注意：Int16范围是-32768到32767，除以32768.0转换为-1.0到1.0
+        const floatData = new Float32Array(sampleCount);
+        for (let i = 0; i < sampleCount; i++) {
+            // 限制范围并转换，避免溢出导致的噪音
+            floatData[i] = Math.max(-1.0, Math.min(1.0, pcmData[i] / 32768.0));
         }
 
         // 添加到队列
@@ -805,6 +842,143 @@ const startStreamingPlayback = () => {
     };
 
     scheduleNextChunk();
+};
+
+// 从缓存拉取音频并流式播放（边缓存边播放）
+const fetchAudioFromCache = async (url: string) => {
+    try {
+        // 构建完整URL（如果是相对路径）
+        const fullUrl = url.startsWith('http') ? url : `${window.location.protocol}//${window.location.host}${url}`;
+        
+        console.log('[音频缓存] 🎵 开始边缓存边播放:', fullUrl);
+        
+        // 初始化流式播放器（如果还没有初始化）
+        if (!streamingAudioContext) {
+            console.log('[音频缓存] 初始化流式播放器');
+            initStreamingPlayback();
+        }
+        
+        let totalBytesPlayed = 0; // 已播放的总字节数
+        let isComplete = false;
+        
+        // 循环拉取并播放，直到缓存ready
+        while (!isComplete) {
+            // 使用fetch获取音频数据（每次请求获取全部数据）
+            const response = await fetch(fullUrl);
+            
+            console.log('[音频缓存] HTTP响应状态:', response.status, response.statusText);
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[音频缓存] HTTP错误响应:', errorText);
+                if (response.status === 404 || response.status === 202) {
+                    // 缓存还未准备好，等待后重试
+                    console.log('[音频缓存] 缓存还未准备好，等待300ms后重试...');
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    continue;
+                }
+                throw new Error(`HTTP错误: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+            
+            // 检查是否还在生成中
+            const audioStatus = response.headers.get('X-Audio-Status');
+            const contentType = response.headers.get('Content-Type');
+            
+            console.log('[音频缓存] Content-Type:', contentType, 'Status:', audioStatus);
+            
+            // 流式读取全部数据
+            const reader = response.body?.getReader();
+            if (!reader) {
+                // 如果没有流，检查是否已完成
+                if (audioStatus !== 'generating') {
+                    isComplete = true;
+                    break;
+                }
+                // 等待后重试
+                await new Promise(resolve => setTimeout(resolve, 300));
+                continue;
+            }
+            
+            let allData = new Uint8Array(0);
+            
+            // 读取全部数据
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                
+                // 合并数据
+                const newData = new Uint8Array(allData.length + value.length);
+                newData.set(allData);
+                newData.set(value, allData.length);
+                allData = newData;
+            }
+            
+            console.log('[音频缓存] 本次请求完成，总数据长度:', allData.length, '已播放:', totalBytesPlayed);
+            
+            // 只播放新增部分（从totalBytesPlayed开始）
+            if (allData.length > totalBytesPlayed) {
+                const newData = allData.slice(totalBytesPlayed);
+                console.log('[音频缓存] 发现新数据:', newData.length, 'bytes，开始播放');
+                
+                // 播放新数据
+                let buffer = newData;
+                let chunkCount = 0;
+                const minChunkSize = 8192;
+                
+                while (buffer.length >= minChunkSize) {
+                    // 确保chunk是偶数长度（PCM16需要2字节对齐）
+                    const chunkSize = buffer.length % 2 === 0 ? minChunkSize : minChunkSize - 1;
+                    const chunk = buffer.slice(0, chunkSize);
+                    buffer = buffer.slice(chunkSize);
+                    chunkCount++;
+                    
+                    // 转换为base64并播放
+                    const base64Chunk = btoa(String.fromCharCode.apply(null, Array.from(chunk)));
+                    if (chunkCount % 20 === 0) {
+                        console.log(`[音频缓存] 播放音频块 #${chunkCount}, 已播放: ${totalBytesPlayed + chunkSize} bytes`);
+                    }
+                    playAudioChunk(base64Chunk);
+                    totalBytesPlayed += chunkSize;
+                }
+                
+                // 处理剩余数据
+                if (buffer.length > 0) {
+                    const alignedLength = buffer.length % 2 === 0 ? buffer.length : buffer.length - 1;
+                    if (alignedLength > 0) {
+                        const finalChunk = buffer.slice(0, alignedLength);
+                        const base64Chunk = btoa(String.fromCharCode.apply(null, Array.from(finalChunk)));
+                        playAudioChunk(base64Chunk);
+                        totalBytesPlayed += alignedLength;
+                    }
+                }
+            } else {
+                console.log('[音频缓存] 无新数据，等待中...');
+            }
+            
+            // 如果还在生成中，等待后继续拉取新数据
+            if (audioStatus === 'generating') {
+                console.log('[音频缓存] 音频还在生成中，等待300ms后继续拉取新数据...');
+                await new Promise(resolve => setTimeout(resolve, 300));
+            } else {
+                // 已完成
+                isComplete = true;
+                break;
+            }
+        }
+        
+        console.log(`[音频缓存] ✅ 音频播放完成，共播放 ${totalBytesPlayed} bytes`);
+        
+        // 等待播放完成
+        setTimeout(() => {
+            finalizeStreamingPlayback();
+        }, 500);
+    } catch (error: any) {
+        console.error('[音频缓存] ❌ 拉取音频失败:', error);
+        error.value = `音频拉取失败: ${error.message}`;
+        throw error;
+    }
 };
 
 // 完成流式播放
@@ -944,5 +1118,7 @@ onBeforeUnmount(() => {
     }
 });
 </script>
+
+
 
 

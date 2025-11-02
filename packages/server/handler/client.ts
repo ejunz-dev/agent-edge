@@ -200,50 +200,95 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                 if (text) {
                     // 文本模式：直接从AI对话开始（实时ASR已完成转录）
                     logger.info('收到文本消息，直接进行AI对话: %s', text);
-                    const aiResponse = await voiceService.chat(text, conversationHistory);
                     
                     // 检查是否使用realtime TTS（支持流式播放）
                     const voiceConfig = (config as any).voice || {};
                     const ttsConfig = voiceConfig.tts || {};
                     const model = ttsConfig.model || 'qwen3-tts-flash';
+                    const aiConfig = voiceConfig.ai || {};
+                    const endpoint = aiConfig.endpoint || '';
+                    const isWebSocket = endpoint.startsWith('ws://') || endpoint.startsWith('wss://');
                     
-                    if (model.includes('realtime')) {
-                        // 使用流式TTS：先发送初始消息，然后流式发送音频分片
-                        logger.info('使用流式TTS模式');
+                    if (model.includes('realtime') && isWebSocket) {
+                        // 使用流式AI+流式TTS：收到内容立即播放
+                        logger.info('使用流式AI+TTS模式');
                         
-                        // 先发送文本和AI回复（客户端会自己随机选择动画）
+                        let isFirstChunk = true;
+                        let fullAiResponse = '';
+                        
+                        // 先发送初始消息（客户端会自己随机选择动画）
                         this.send({
                             key: 'voice_chat',
                             result: {
                                 text: text,
-                                aiResponse: aiResponse,
+                                aiResponse: '', // 初始为空，后续通过流式更新
                                 audio: null, // 音频将通过流式分片发送
                                 streaming: true, // 标识这是流式传输
                             },
                         });
                         
-                        // 然后流式发送音频
-                        try {
-                            await (voiceService as any).streamTtsRealtime(
-                                aiResponse,
-                                { ...ttsConfig, voice: ttsConfig.voice || 'Cherry' },
-                                (audioChunk: Buffer) => {
-                                    // 每收到一个音频分片，立即发送给客户端
-                                    this.send({
-                                        key: 'voice_chat_audio',
-                                        chunk: audioChunk.toString('base64'),
-                                    });
+                            try {
+                                // 直接通过WebSocket流式发送音频，不使用HTTP缓存
+                                const result = await (voiceService as any).chatStreamWithTts(
+                                    text,
+                                    conversationHistory,
+                                    // onAudioChunk: 直接通过WebSocket发送音频分片
+                                    (audioChunk: Buffer) => {
+                                        this.send({
+                                            key: 'voice_chat_audio',
+                                            chunk: audioChunk.toString('base64'),
+                                        });
+                                    },
+                                    // onTextChunk: 更新文本内容
+                                    (textChunk: string) => {
+                                        fullAiResponse += textChunk;
+                                        // 实时更新AI回复（用于显示）
+                                        this.send({
+                                            key: 'voice_chat_text',
+                                            chunk: textChunk,
+                                            fullText: fullAiResponse,
+                                        });
+                                    },
+                                    false // 不使用缓存模式，直接流式发送
+                                );
+                                
+                                // 处理返回结果
+                                let finalText: string;
+                                if (typeof result === 'string') {
+                                    finalText = result;
+                                } else {
+                                    finalText = result.text;
                                 }
-                            );
+                                
+                                // 发送音频流完成信号
+                                this.send({
+                                    key: 'voice_chat_audio',
+                                    done: true,
+                                });
                             
-                            // 发送流式传输完成信号
+                            // 更新最终回复
                             this.send({
-                                key: 'voice_chat_audio',
-                                done: true,
+                                key: 'voice_chat',
+                                result: {
+                                    text: text,
+                                    aiResponse: fullAiResponse,
+                                    streaming: false,
+                                },
                             });
+                            
+                            // 更新对话历史
+                            let updatedHistory = conversationHistory || [];
+                            updatedHistory = [...updatedHistory];
+                            updatedHistory.push({ role: 'user', content: text });
+                            updatedHistory.push({ role: 'assistant', content: fullAiResponse });
+                            if (updatedHistory.length > 20) {
+                                updatedHistory = updatedHistory.slice(-20);
+                            }
+                            (this as any).conversationHistory = updatedHistory;
                         } catch (e: any) {
-                            logger.error('流式TTS失败，回退到非流式模式: %s', e.message);
+                            logger.error('流式AI+TTS失败，回退到非流式模式: %s', e.message);
                             // 回退到非流式模式
+                            const aiResponse = await voiceService.chat(text, conversationHistory);
                             const audioBuffer = await voiceService.tts(aiResponse);
                             this.send({
                                 key: 'voice_chat',
@@ -255,7 +300,8 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                             });
                         }
                     } else {
-                        // 非流式TTS：等待完整音频后发送（客户端会自己随机选择动画）
+                        // 非流式模式：等待完整回复后播放
+                        const aiResponse = await voiceService.chat(text, conversationHistory);
                         const audioBuffer = await voiceService.tts(aiResponse);
                         
                         result = {

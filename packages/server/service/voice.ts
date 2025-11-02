@@ -871,6 +871,13 @@ class VoiceService extends Service implements IVoiceService {
             let pendingSentences: string[] = []; // 待处理的句子队列（用于连接关闭时补全）
             // 按句子处理：累积到完整句子后再提交TTS
             const SENTENCE_END_REGEX = /[。！？\n\n]/; // 句子结束符：句号、问号、感叹号、双换行
+            // 工具调用结果队列：用于确保多个工具调用结果按顺序播放
+            interface ToolResultQueueItem {
+                text: string;
+                processed: boolean; // 是否已开始处理
+            }
+            let toolResultQueue: ToolResultQueueItem[] = [];
+            let isProcessingToolResult = false; // 是否正在处理工具调用结果的TTS
 
             // 初始化TTS连接（复用单个连接）
             const initTtsConnection = () => {
@@ -959,8 +966,10 @@ class VoiceService extends Service implements IVoiceService {
                             }
                         } else if (json.type === 'response.audio.delta') {
                             // 接收音频分片，立即发送给客户端
-                            // 注意：缓存模式下，onAudioChunk是undefined，但wrappedOnAudioChunk仍会被调用以写入缓存
-                            if (json.delta && !isToolCalling) {
+                            // 注意：音频已经在TTS服务端生成，应该立即播放，不应该因为isToolCalling而阻塞
+                            // isToolCalling只用于暂停新的TTS提交，不影响已提交的音频播放
+                            // 缓存模式下，onAudioChunk是undefined，但wrappedOnAudioChunk仍会被调用以写入缓存
+                            if (json.delta) {
                                 const audioChunk = Buffer.from(json.delta, 'base64');
                                 // 只在每10个chunk或重要事件时记录，减少日志噪音
                                 if (useCacheMode) {
@@ -978,13 +987,19 @@ class VoiceService extends Service implements IVoiceService {
                             }
                             this.logger.info(`[AI WebSocket+TTS] [${connectionId}] TTS音频生成完成，剩余pending commits: %d`, pendingCommits);
                             
+                            // 如果pending commits变为0，检查是否需要处理工具结果队列
+                            if (pendingCommits === 0 && toolResultQueue.length > 0 && !isProcessingToolResult && !isToolCalling) {
+                                this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] pending commits变为0，触发工具结果队列处理`);
+                                processToolResultQueue();
+                            }
+                            
                             // 继续处理累积的文本（不等待pending commits）
-                            if (textBuffer.length > 0 && !isToolCalling && !aiResponseDone) {
+                            if (textBuffer.length > 0 && !isToolCalling && !aiResponseDone && !isProcessingToolResult) {
                                 flushTextBuffer(false); // 不强制commit，让自动逻辑决定
                             }
                             
                             // 如果AI响应已完成，且所有文本都已commit，且所有音频都已生成完成，可以关闭连接
-                            if (aiResponseDone && pendingCommits === 0 && ttsBuffer.length === 0 && textBuffer.length === 0) {
+                            if (aiResponseDone && pendingCommits === 0 && ttsBuffer.length === 0 && textBuffer.length === 0 && toolResultQueue.length === 0 && !isProcessingToolResult) {
                                 this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 所有音频生成完成（pendingCommits=0），准备关闭TTS连接`);
                                 // 等待一小段时间确保所有音频数据都已发送到客户端，然后关闭连接
                                 finalizeTtsConnection(() => {
@@ -1284,6 +1299,71 @@ class VoiceService extends Service implements IVoiceService {
                 }
             };
 
+            // 处理工具结果队列（确保按顺序播放）
+            const processToolResultQueue = () => {
+                // 如果正在处理或队列为空，直接返回
+                if (isProcessingToolResult || toolResultQueue.length === 0) {
+                    return;
+                }
+
+                // 如果还在工具调用中，等待所有工具调用完成
+                if (isToolCalling) {
+                    this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 工具调用中，等待所有工具完成后再处理队列`);
+                    return;
+                }
+
+                // 如果当前有pending commits，等待它们完成后再处理队列（由response.audio.done触发）
+                if (pendingCommits > 0) {
+                    this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 当前有%d个pending commits，等待完成后再处理队列`, pendingCommits);
+                    return;
+                }
+
+                // 开始处理队列
+                isProcessingToolResult = true;
+                const queueItem = toolResultQueue[0];
+
+                // 如果该项已处理，说明之前的pending commits已经完成，可以移除了
+                if (queueItem.processed) {
+                    toolResultQueue.shift();
+                    isProcessingToolResult = false;
+                    this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 工具结果队列项完成并移除 (剩余: %d项)`, toolResultQueue.length);
+                    
+                    // 继续处理下一项（如果有）
+                    if (toolResultQueue.length > 0) {
+                        processToolResultQueue();
+                    }
+                    return;
+                }
+
+                this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 开始处理工具结果队列第1项: %d字符 (队列长度: %d)`, queueItem.text.length, toolResultQueue.length);
+
+                // 标记为已处理
+                queueItem.processed = true;
+
+                // 处理这个工具结果的文本
+                if (useRealtimeTts) {
+                    // 确保TTS连接已初始化
+                    if (!ttsWs && !ttsClosed) {
+                        initTtsConnection();
+                    }
+
+                    // 将整个工具结果的文本添加到textBuffer，然后按正常流程处理
+                    // 这样可以复用现有的句子处理逻辑
+                    const originalTextBuffer = textBuffer;
+                    textBuffer = queueItem.text;
+                    
+                    // 按句子处理并提交（这会创建pending commits）
+                    flushTextBuffer(true); // 强制commit，按句子处理
+                    
+                    // 恢复原来的textBuffer（如果有）
+                    textBuffer = originalTextBuffer;
+                }
+
+                // 注意：不在这里等待pending commits完成，而是由response.audio.done事件触发
+                // 当pendingCommits变为0时，会自动调用processToolResultQueue，此时queueItem.processed=true，会被移除
+                // 然后继续处理下一项
+            };
+
             // 处理文本缓冲区（用于done消息时的强制flush）
             const flushTextBuffer = (shouldCommit = false) => {
                 if (textBuffer.length === 0) {
@@ -1323,6 +1403,24 @@ class VoiceService extends Service implements IVoiceService {
                 }
             };
 
+            // 检测是否为系统工具调用提示文本（不应该转TTS）
+            const isSystemToolCallText = (text: string): boolean => {
+                const trimmed = text.trim();
+                // 检测常见的系统提示模式
+                const systemPatterns = [
+                    /^正在调用.*工具/i,
+                    /^计划调用以下工具/i,
+                    /^.*工具调用.*开始/i,
+                    /^开始执行/i,
+                    /^.*工具.*执行中/i,
+                    /^.*工具.*已完成/i,
+                    /^调用.*工具.*请稍候/i,
+                    /^正在.*工具.*请稍候/i,
+                ];
+                
+                return systemPatterns.some(pattern => pattern.test(trimmed));
+            };
+
             // 添加文本到缓冲区并触发TTS
             const addText = async (content: string) => {
                 // 防止重复处理：检查是否在短时间内收到完全相同的内容
@@ -1343,10 +1441,21 @@ class VoiceService extends Service implements IVoiceService {
                 }
                 lastProcessedTime = now;
                 
-                this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 收到文本片段: "%s" (textBuffer长度: %d)`, content.substring(0, 50), textBuffer.length);
+                this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 收到文本片段: "%s" (textBuffer长度: %d, isToolCalling: %s)`, content.substring(0, 50), textBuffer.length, isToolCalling);
                 
                 // 累积到fullResponse（用于最终返回）
                 fullResponse += content;
+
+                // 检测是否为系统工具调用提示文本
+                const isSystemText = isSystemToolCallText(content);
+                if (isSystemText) {
+                    this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 🔇 检测到系统工具调用提示文本，只发送前端显示，不转TTS: "%s"`, content.substring(0, 50));
+                    // 只发送给前端（让用户看到工具调用状态），但不转TTS
+                    if (onTextChunk) {
+                        onTextChunk(content);
+                    }
+                    return; // 不转TTS，直接返回
+                }
 
                 // 注意：缓存模式下onAudioChunk是undefined，但useRealtimeTts是true，应该继续处理
                 if (!useRealtimeTts) {
@@ -1357,6 +1466,31 @@ class VoiceService extends Service implements IVoiceService {
                     return;
                 }
 
+                // 新API工具调用流程：
+                // 1. AI生成初始回复（自然对话，如"我帮你看看..."） → content消息 → 正常播放（isToolCalling=false）
+                // 2. tool_call_start → API可能发送系统提示文本（会被过滤，不转TTS，只前端显示）
+                // 3. tool_call/tool_calls → 设置isToolCalling=true，工具真正开始执行
+                // 4. tool_result → 单个工具结果返回，恢复TTS（isToolCalling=false）
+                // 5. tool_call_complete → 所有工具完成，恢复TTS（isToolCalling=false）
+                // 6. AI基于结果流式输出（自然对话） → content消息 → 正常播放（isToolCalling=false）
+                // 注意：系统提示文本（如"正在调用xxx工具"）会在isSystemToolCallText中被过滤，不会到达这里
+                if (isToolCalling) {
+                    // 工具真正执行期间收到的content：这些是AI在工具执行期间生成的文本
+                    // 立即发送给前端（让用户实时看到），但不转TTS（累积到textBuffer，等待tool_result时立即处理）
+                    // 注意：系统提示文本已经在上面被过滤了，这里收到的应该是AI自然生成的内容
+                    if (onTextChunk) {
+                        onTextChunk(content);
+                    }
+                    // 文本累积到textBuffer，当tool_result或tool_call_complete到达时立即处理并转为TTS
+                    textBuffer += content;
+                    this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 工具执行中，文本已发送前端（等待工具结果后立即TTS）: "%s"`, content.substring(0, 50));
+                    return;
+                }
+
+                // 正常情况下（isToolCalling=false）：
+                // - 工具调用前的初始回复（"好的，我查询一下..."）
+                // - tool_result之后的后续回复（"这边查询到，xxx时间"）
+                // 这些content消息应该立即流式传输和播放
                 // 累积文本到缓冲区（按句子累积，不立即发送）
                 textBuffer += content;
 
@@ -1504,7 +1638,7 @@ class VoiceService extends Service implements IVoiceService {
                             const systemMessages = ['ping', 'pong', 'connected', 'websocket connected', 'websocket stream connection established'];
                             if (!systemMessages.some(msg => contentTrimmed.includes(msg))) {
                                 contentMessageCount++;
-                                this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 收到第%d个content消息: "%s"`, contentMessageCount, content.substring(0, 50));
+                                this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 📝 收到第%d个content消息 (isToolCalling=%s): "%s"`, contentMessageCount, isToolCalling, content.substring(0, 50));
                                 await addText(content);
                             } else {
                                 this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 忽略content中的系统消息: %s`, content);
@@ -1514,62 +1648,118 @@ class VoiceService extends Service implements IVoiceService {
                         // 忽略连接确认消息
                         this.logger.debug('[AI WebSocket+TTS] 忽略连接消息: %s', json.type);
                     } else if (json.type === 'tool_call_start') {
-                        // 工具调用开始，暂停TTS（不添加提示，避免额外commit）
-                        this.logger.info('[AI WebSocket+TTS] 工具调用开始，暂停TTS');
+                        // 新API流程：工具调用开始
+                        // API会在tool_call_start后立即通过content消息发送"正在调用xxx工具"或"计划调用以下工具..."
+                        // 这些内容应该立即播放，不应该被阻塞
+                        // 流程：tool_call_start → content("正在调用xxx工具") → 工具执行 → tool_result → content(结果回复)
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ========== 工具调用开始 ==========`);
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 当前状态: textBuffer长度=%d, pendingCommits=%d`, textBuffer.length, pendingCommits);
                         
-                        // 先flush当前缓冲区并等待完成
+                        // 确保在工具调用开始前，所有初始回复内容都已处理和播放
+                        // 先flush当前缓冲区（如果有残留文本），确保"好的，我查询一下..."这样的初始回复完全播放
                         if (textBuffer.length > 0) {
-                            flushTextBuffer(true); // 强制commit
+                            this.logger.info(`[AI WebSocket+TTS] [${connectionId}] tool_call_start前，flush初始回复残留文本: %d字符`, textBuffer.length);
+                            
+                            // 先发送给前端（让用户看到初始回复）
+                            if (onTextChunk) {
+                                onTextChunk(textBuffer);
+                            }
+                            
+                            // 然后立即转为TTS（此时isToolCalling还是false，可以正常处理）
+                            if (useRealtimeTts) {
+                                flushTextBuffer(true); // 强制commit，立即播放初始回复的剩余部分
+                            } else {
+                                textBuffer = ''; // 如果不转TTS，直接清空
+                            }
                         }
-                        // 如果ttsBuffer有内容，也需要commit
+                        
+                        // 如果ttsBuffer有内容，也需要commit（确保初始回复的音频完全生成）
                         if (ttsBuffer.length > 0) {
                             commitTtsBuffer(true); // 强制commit
                         }
                         
-                        isToolCalling = true;
+                        // 清空工具结果队列（新的工具调用循环开始）
+                        toolResultQueue = [];
+                        isProcessingToolResult = false;
+                        
+                        // 关键：暂时不设置isToolCalling=true，允许API发送的"正在调用xxx工具"等提示文本正常播放
+                        // API会在tool_call_start后立即发送这些提示文本（通过content消息）
+                        // 等收到真正的工具执行信号时（tool_call或tool_calls），再设置isToolCalling=true
+                        // 注意：如果API在tool_call_start之前就发送了"正在调用"文本，那它会在isToolCalling=false时正常播放
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 工具调用开始，等待API发送"正在调用"提示文本（isToolCalling暂时保持false）`);
                     } else if (json.type === 'tool_call' || json.tool_calls || json.toolCall) {
-                        // 工具调用请求（直接格式）
-                        isToolCalling = true;
+                        // 工具调用请求（真正的工具执行开始）
+                        // 此时API已经发送了"正在调用xxx工具"的提示文本，现在开始真正执行工具
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ========== 工具真正开始执行 ==========`);
                         
-                        // 先flush当前缓冲区并commit
+                        // 确保"正在调用"提示文本已处理完毕
                         if (textBuffer.length > 0) {
-                            flushTextBuffer(true); // 强制commit
+                            this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 工具执行前，flush"正在调用"提示文本: %d字符`, textBuffer.length);
+                            if (onTextChunk) {
+                                onTextChunk(textBuffer);
+                            }
+                            if (useRealtimeTts) {
+                                flushTextBuffer(true); // 强制commit，立即播放"正在调用"提示
+                            } else {
+                                textBuffer = '';
+                            }
                         }
-                        // 如果ttsBuffer有内容，也需要commit
+                        
                         if (ttsBuffer.length > 0) {
                             commitTtsBuffer(true); // 强制commit
                         }
-
+                        
+                        // 现在设置isToolCalling=true，暂停新的TTS提交（工具执行期间）
+                        // 但已提交的音频会继续播放（因为response.audio.delta不再检查isToolCalling）
+                        isToolCalling = true;
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ✅ 已设置 isToolCalling=true，工具执行期间暂停新的TTS提交`);
+                        
                         const toolCalls = json.tool_calls || (json.toolCall ? [json.toolCall] : []);
                         for (const toolCall of toolCalls) {
                             await this.handleToolCall(toolCall, ws);
                         }
-                    } else if (json.type === 'tool_result' || json.type === 'tool_call_complete') {
-                        // 工具调用完成，恢复TTS
-                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 工具调用完成，恢复TTS`);
-                        isToolCalling = false;
-                        // 工具调用完成后，继续处理后续内容
-                        // 检查是否有待处理的完整句子
-                        if (textBuffer.length > 0) {
-                            let sentenceEndIndex = -1;
-                            let endLength = 1;
-                            const doubleNewlineIndex = textBuffer.search(/\n\n/);
-                            if (doubleNewlineIndex >= 0) {
-                                sentenceEndIndex = doubleNewlineIndex;
-                                endLength = 2;
-                            } else {
-                                const singleEndIndex = textBuffer.search(/[。！？]/);
-                                if (singleEndIndex >= 0) {
-                                    sentenceEndIndex = singleEndIndex;
-                                    endLength = 1;
-                                }
-                            }
-                            if (sentenceEndIndex >= 0) {
-                                const sentence = textBuffer.substring(0, sentenceEndIndex + endLength);
-                                textBuffer = textBuffer.substring(sentenceEndIndex + endLength);
-                                await flushSentence(sentence.trim());
-                            }
+                    } else if (json.type === 'tool_result') {
+                        // 新API流程：单个工具结果返回
+                        // 流程：tool_result → tool_call_complete → content(AI基于工具结果的回复)
+                        // 注意：tool_result时，AI的回复还没有到达，需要等待tool_call_complete后才会收到content
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ========== 工具结果到达 ==========`);
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 工具: %s, 当前状态: isToolCalling=%s, textBuffer长度=%d`, json.tool || 'unknown', isToolCalling, textBuffer.length);
+                        
+                        // 工具执行期间累积的文本（如果有，应该是工具执行状态更新，不是AI回复）
+                        const toolExecutionText = textBuffer;
+                        textBuffer = ''; // 清空textBuffer，准备接收tool_call_complete后的content消息
+                        
+                        // 注意：此时isToolCalling仍然为true，需要等待tool_call_complete后才恢复TTS
+                        // 因为AI的回复会在tool_call_complete之后才到达
+                        if (toolExecutionText.length > 0) {
+                            // 处理工具执行期间的状态文本（通常是系统提示，已经被isSystemToolCallText过滤了）
+                            this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 工具执行期间文本（通常为空）: %d字符`, toolExecutionText.length);
                         }
+                        
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 等待tool_call_complete，然后接收AI的回复`);
+                    } else if (json.type === 'tool_call_complete') {
+                        // 新API流程：单个工具调用完成，立即恢复TTS
+                        // 流程：tool_call_complete → content(AI基于工具结果的回复，如"哇哦,看看这些比赛!最新的比赛是...")
+                        // AI会在tool_call_complete后立即发送content消息，需要立即播放
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ========== 工具调用完成，恢复TTS ==========`);
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] 当前状态: isToolCalling=%s, textBuffer长度=%d, pendingCommits=%d`, isToolCalling, textBuffer.length, pendingCommits);
+                        
+                        // 处理工具执行期间累积的文本（如果有，通常是空的，因为系统提示已被过滤）
+                        const toolExecutionText = textBuffer;
+                        textBuffer = ''; // 清空textBuffer，准备接收AI基于工具结果的回复
+                        
+                        // 关键：立即恢复TTS，允许AI基于工具结果的content消息立即播放
+                        isToolCalling = false;
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ✅ 已设置 isToolCalling=false，准备接收AI基于工具结果的回复`);
+                        
+                        if (toolExecutionText.length > 0) {
+                            // 处理工具执行期间累积的文本（通常是空的，因为系统提示已被过滤）
+                            this.logger.debug(`[AI WebSocket+TTS] [${connectionId}] 工具执行期间累积的文本（通常为空）: %d字符`, toolExecutionText.length);
+                            // 这些文本通常不应该转TTS（因为它们应该是系统提示）
+                            // 但如果确实有AI的自然对话文本，也会在这里处理
+                        }
+                        
+                        this.logger.info(`[AI WebSocket+TTS] [${connectionId}] ========== TTS已恢复，等待AI基于工具结果的content消息 ========== (pendingCommits: %d)`, pendingCommits);
                     } else if (json.type === 'done' || json.type === 'finished') {
                         // AI响应完成，但TTS可能还在生成音频
                         // 注意：done消息中的message字段是完整的回复，但我们已经在流式content中处理了所有片段

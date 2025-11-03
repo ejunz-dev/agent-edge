@@ -2,7 +2,7 @@ import path from 'node:path';
 import { Context, Service } from 'cordis';
 import Datastore from 'nedb-promises';
 import {
-    MCPLogDoc, MCPServerDoc, MCPToolDoc,
+    MCPLogDoc, MCPServerDoc, MCPToolDoc, VTuberAuthTokenDoc,
 } from '../interface';
 import { fs } from '../utils';
 
@@ -10,6 +10,7 @@ export interface Collections {
     mcplog: MCPLogDoc;
     mcpserver: MCPServerDoc;
     mcptool: MCPToolDoc;
+    vtuberAuthToken: VTuberAuthTokenDoc;
 }
 
 declare module 'cordis' {
@@ -40,5 +41,6 @@ export default class DBService extends Service {
         await this.initDatabase('mcplog', ['_id', 'timestamp', 'level', 'tool']);
         await this.initDatabase('mcpserver', ['_id', 'name', 'endpoint', 'status', 'lastUpdate']);
         await this.initDatabase('mcptool', ['_id', 'name', 'server', 'callCount']);
+        await this.initDatabase('vtuberAuthToken', ['_id', 'host', 'port']);
     }
 }

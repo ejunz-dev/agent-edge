@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>音频播放器 - Agent Edge</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: #2a2a2a;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            min-width: 300px;
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 {
+            font-size: 20px;
+            margin-bottom: 16px;
+            color: #fff;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 16px;
+            padding: 12px;
+            background: #1a1a1a;
+            border-radius: 8px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #666;
+            animation: pulse 2s infinite;
+        }
+        .status-dot.connected {
+            background: #4caf50;
+        }
+        .status-dot.playing {
+            background: #ff9800;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        .status-text {
+            flex: 1;
+        }
+        .info {
+            font-size: 12px;
+            color: #999;
+            margin-top: 8px;
+        }
+        .hidden {
+            display: none;
+        }
+        .enable-audio-btn {
+            margin-top: 20px;
+            padding: 12px 24px;
+            font-size: 16px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .enable-audio-btn:hover {
+            background: #45a049;
+        }
+        .enable-audio-btn:active {
+            background: #3d8b40;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎵 音频播放器</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <div class="status-text" id="statusText">正在连接...</div>
+        </div>
+        <div class="info" id="info">等待音频数据...</div>
+        <button id="enableAudioBtn" class="enable-audio-btn hidden" onclick="enableAudioPlayback()">🔊 点击启用音频播放</button>
+    </div>
+
+    <script>
+        // 流式播放相关变量
+        let audioContext = null;
+        let audioQueue = [];
+        let isPlaying = false;
+        let ws = null;
+        let chunksReceived = 0;
+        let bytesReceived = 0;
+        let audioEnabled = false; // 用户是否已启用音频
+        const sampleRate = 24000;
+
+        // 更新状态
+        function updateStatus(text, className) {
+            const statusText = document.getElementById('statusText');
+            const statusDot = document.getElementById('statusDot');
+            const info = document.getElementById('info');
+            
+            statusText.textContent = text;
+            statusDot.className = 'status-dot ' + (className || '');
+            
+            if (chunksReceived > 0) {
+                info.textContent = `已接收 ${chunksReceived} 个音频块，共 ${(bytesReceived / 1024).toFixed(1)} KB`;
+            }
+        }
+
+        // 初始化音频播放
+        function initAudio() {
+            try {
+                // 如果 AudioContext 已存在且未关闭，重用
+                if (audioContext && audioContext.state !== 'closed') {
+                    console.log('[音频播放器] 复用现有 AudioContext，状态:', audioContext.state);
+                    // 如果重用的 AudioContext 是 suspended，确保按钮显示
+                    if (audioContext.state === 'suspended' && !audioEnabled) {
+                        const btn = document.getElementById('enableAudioBtn');
+                        if (btn) {
+                            btn.classList.remove('hidden');
+                        }
+                        updateStatus('已就绪（需要启用音频）', 'connected');
+                    }
+                    return;
+                }
+                
+                audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
+                audioQueue = [];
+                isPlaying = false;
+                audioEnabled = false; // 重置启用状态，确保需要用户交互
+                console.log('[音频播放器] AudioContext 已创建，采样率:', audioContext.sampleRate, '状态:', audioContext.state);
+                
+                // 无论状态如何，都显示启用按钮（确保用户必须点击）
+                const btn = document.getElementById('enableAudioBtn');
+                if (btn) {
+                    btn.classList.remove('hidden');
+                }
+                
+                // 根据状态更新提示
+                if (audioContext.state === 'suspended') {
+                    console.warn('[音频播放器] AudioContext 处于 suspended 状态，需要用户交互');
+                    updateStatus('已就绪（需要启用音频）', 'connected');
+                } else {
+                    // 即使不是 suspended，也要求用户点击按钮以确保通过用户交互启用
+                    updateStatus('已就绪（请点击按钮启用音频）', 'connected');
+                }
+            } catch (err) {
+                console.error('[音频播放器] 初始化音频失败:', err);
+                updateStatus('音频初始化失败', '');
+            }
+        }
+
+        // 播放音频分片
+        function playAudioChunk(base64Data) {
+            if (!audioContext) {
+                console.error('[音频播放器] AudioContext 未初始化');
+                return;
+            }
+
+            if (!base64Data || base64Data.length === 0) {
+                console.warn('[音频播放器] 音频数据为空');
+                return;
+            }
+
+            try {
+                // 解码 base64
+                const binaryString = atob(base64Data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+
+                // 确保字节数是偶数（PCM16需要2字节对齐）
+                const alignedLength = bytes.length - (bytes.length % 2);
+                if (alignedLength === 0) {
+                    console.warn('[音频播放器] 音频数据太小，跳过');
+                    return;
+                }
+                const alignedBytes = bytes.slice(0, alignedLength);
+
+                // 转换为 Int16Array (PCM16, 小端序)
+                const pcmData = new Int16Array(alignedBytes.buffer, alignedBytes.byteOffset, alignedBytes.length / 2);
+                
+                // 转换为 Float32Array (-1.0 到 1.0)
+                const floatData = new Float32Array(pcmData.length);
+                for (let i = 0; i < pcmData.length; i++) {
+                    floatData[i] = pcmData[i] / 32768.0;
+                }
+
+                chunksReceived++;
+                bytesReceived += alignedBytes.length;
+
+                // 添加到队列
+                audioQueue.push(floatData);
+                console.log('[音频播放器] 音频分片已加入队列，队列长度:', audioQueue.length, '样本数:', floatData.length);
+
+                // 如果还没开始播放且音频已启用，立即开始
+                if (!isPlaying && audioEnabled) {
+                    startPlayback();
+                } else if (!audioEnabled) {
+                    console.log('[音频播放器] 音频未启用，等待用户交互');
+                }
+            } catch (err) {
+                console.error('[音频播放器] 处理音频分片失败:', err);
+            }
+        }
+
+        // 开始播放
+        function startPlayback() {
+            if (!audioContext) {
+                console.warn('[音频播放器] AudioContext 不存在，无法播放');
+                return;
+            }
+            
+            // 检查 AudioContext 状态
+            if (audioContext.state === 'suspended') {
+                console.warn('[音频播放器] AudioContext 处于 suspended 状态，需要先启用音频');
+                if (!audioEnabled) {
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.remove('hidden');
+                    }
+                }
+                return;
+            }
+            
+            // 确保音频已启用
+            if (!audioEnabled) {
+                console.warn('[音频播放器] 音频未启用，无法播放');
+                return;
+            }
+            
+            if (audioContext.state === 'closed') {
+                console.error('[音频播放器] AudioContext 已关闭，重新初始化');
+                initAudio();
+                return;
+            }
+            
+            if (isPlaying) {
+                console.log('[音频播放器] 已在播放中，跳过');
+                return;
+            }
+
+            isPlaying = true;
+            updateStatus('正在播放', 'playing');
+            console.log('[音频播放器] 开始播放，队列长度:', audioQueue.length, 'AudioContext 状态:', audioContext.state);
+
+            const playNext = () => {
+                if (!audioContext) {
+                    console.warn('[音频播放器] AudioContext 不存在，停止播放');
+                    isPlaying = false;
+                    return;
+                }
+                
+                // 检查 AudioContext 状态
+                if (audioContext.state === 'closed') {
+                    console.warn('[音频播放器] AudioContext 已关闭，停止播放');
+                    isPlaying = false;
+                    return;
+                }
+                
+                if (audioContext.state === 'suspended') {
+                    console.warn('[音频播放器] AudioContext 处于 suspended 状态');
+                    isPlaying = false;
+                    return;
+                }
+                
+                if (audioQueue.length === 0) {
+                    // 队列为空，等待更多数据（但不要太频繁检查）
+                    setTimeout(playNext, 50);
+                    return;
+                }
+
+                const chunk = audioQueue.shift();
+                if (!chunk || chunk.length === 0) {
+                    console.warn('[音频播放器] 队列中的分片为空，跳过');
+                    setTimeout(playNext, 0);
+                    return;
+                }
+                // 创建 AudioBuffer
+                const buffer = audioContext.createBuffer(1, chunk.length, sampleRate);
+                buffer.getChannelData(0).set(chunk);
+
+                // 创建并播放
+                const source = audioContext.createBufferSource();
+                source.buffer = buffer;
+                source.connect(audioContext.destination);
+
+                source.onended = () => {
+                    // 当前分片播放完成，检查是否所有音频都已播放完成
+                    setTimeout(() => {
+                        // 检查是否所有音频都已播放完成（队列为空且数据已发送完成）
+                        const dataSentComplete = typeof window !== 'undefined' && window.audioDataSentComplete === true;
+                        if (audioQueue.length === 0 && dataSentComplete && isPlaying) {
+                            // 队列为空且数据已发送完成，这是最后一个分片
+                            isPlaying = false;
+                            console.log('[音频播放器] 所有音频分片播放完成');
+                            // 通知后端播放完成
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                try {
+                                    ws.send(JSON.stringify({ type: 'playback_complete' }));
+                                    console.log('[音频播放器] 已通知后端播放完成');
+                                    // 重置标志
+                                    if (typeof window !== 'undefined') {
+                                        window.audioDataSentComplete = false;
+                                    }
+                                } catch (err) {
+                                    console.error('[音频播放器] 发送播放完成通知失败:', err);
+                                }
+                            }
+                            // 不再调用 playNext，因为播放已完成
+                            return;
+                        }
+                        playNext();
+                    }, 0);
+                };
+
+                source.onerror = (err) => {
+                    console.error('[音频播放器] 播放源错误:', err);
+                    isPlaying = false;
+                };
+
+                try {
+                    source.start(0);
+                    console.log('[音频播放器] 正在播放分片，样本数:', chunk.length, '剩余队列:', audioQueue.length);
+                } catch (err) {
+                    console.error('[音频播放器] 播放分片失败:', err);
+                    // 继续播放下一个
+                    setTimeout(playNext, 0);
+                }
+            };
+
+            playNext();
+        }
+
+        // 启用音频播放（用户交互）
+        function enableAudioPlayback() {
+            if (!audioContext) {
+                console.error('[音频播放器] AudioContext 不存在');
+                return;
+            }
+            
+            // 无论状态如何，都尝试恢复 AudioContext（确保音频真正启用）
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().then(() => {
+                    console.log('[音频播放器] AudioContext 已恢复，状态:', audioContext.state);
+                    audioEnabled = true;
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.add('hidden');
+                    }
+                    updateStatus('已就绪', 'connected');
+                    
+                    // 如果队列中有数据，立即开始播放
+                    if (audioQueue.length > 0 && !isPlaying) {
+                        console.log('[音频播放器] 队列中有数据，开始播放');
+                        startPlayback();
+                    }
+                }).catch(err => {
+                    console.error('[音频播放器] 恢复 AudioContext 失败:', err);
+                    updateStatus('启用音频失败', '');
+                });
+            } else {
+                // 如果已经是 running 状态，也需要确保音频真正启用
+                // 尝试 resume 以确保（即使状态不是 suspended，resume 也不会报错）
+                audioContext.resume().then(() => {
+                    console.log('[音频播放器] AudioContext 已确认，状态:', audioContext.state);
+                    audioEnabled = true;
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.add('hidden');
+                    }
+                    updateStatus('已就绪', 'connected');
+                    
+                    // 如果队列中有数据，立即开始播放
+                    if (audioQueue.length > 0 && !isPlaying) {
+                        console.log('[音频播放器] 队列中有数据，开始播放');
+                        startPlayback();
+                    }
+                }).catch(err => {
+                    console.error('[音频播放器] 确认 AudioContext 失败:', err);
+                    // 即使失败，也尝试设置标志
+                    audioEnabled = true;
+                    const btn = document.getElementById('enableAudioBtn');
+                    if (btn) {
+                        btn.classList.add('hidden');
+                    }
+                    updateStatus('已就绪', 'connected');
+                });
+            }
+        }
+
+        // 完成播放
+        function finalizePlayback() {
+            updateStatus('播放完成', 'connected');
+            
+            // 等待队列清空且当前播放完成
+            const checkQueue = setInterval(() => {
+                if (audioQueue.length === 0 && !isPlaying) {
+                    // 所有音频已播放完成，通知后端
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        try {
+                            ws.send(JSON.stringify({ type: 'playback_complete' }));
+                            console.log('[音频播放器] 已通知后端播放完成');
+                        } catch (err) {
+                            console.error('[音频播放器] 发送播放完成通知失败:', err);
+                        }
+                    }
+                    
+                    setTimeout(() => {
+                        if (audioContext) {
+                            audioContext.close().catch(() => {});
+                        }
+                        audioContext = null;
+                        isPlaying = false;
+                        audioQueue = [];
+                        chunksReceived = 0;
+                        bytesReceived = 0;
+                        updateStatus('已就绪', 'connected');
+                        initAudio(); // 重新初始化，准备下一次播放
+                    }, 500);
+                    clearInterval(checkQueue);
+                } else if (audioQueue.length === 0 && isPlaying) {
+                    // 队列已空，但可能还有正在播放的分片，继续等待
+                    // 不发送通知，等待当前分片播放完成
+                }
+            }, 100);
+        }
+
+        // 连接 WebSocket
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 10; // 最大重连次数
+        let reconnectTimer = null;
+        
+        function connectWebSocket() {
+            // client 模式下使用当前页面的 WebSocket（同源）
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/audio-ws`;
+            console.log('[音频播放器] 连接 WebSocket:', wsUrl);
+            
+            updateStatus('正在连接...', '');
+            
+            // 如果已有连接，先关闭
+            if (ws && ws.readyState !== WebSocket.CLOSED) {
+                try {
+                    ws.close();
+                } catch (e) {
+                    // 忽略错误
+                }
+            }
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log('[音频播放器] WebSocket 已连接');
+                updateStatus('已连接', 'connected');
+                reconnectAttempts = 0; // 重置重连计数
+                
+                // 清除重连定时器
+                if (reconnectTimer) {
+                    clearTimeout(reconnectTimer);
+                    reconnectTimer = null;
+                }
+                
+                initAudio();
+                
+                // 发送就绪消息
+                try {
+                    ws.send(JSON.stringify({ type: 'ready' }));
+                } catch (err) {
+                    console.error('[音频播放器] 发送就绪消息失败:', err);
+                }
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    console.log('[音频播放器] 收到消息:', data.type);
+                    if (data.type === 'audio_chunk') {
+                        if (data.chunk) {
+                            console.log('[音频播放器] 收到音频分片，大小:', data.chunk.length);
+                            playAudioChunk(data.chunk);
+                        } else {
+                            console.warn('[音频播放器] 音频分片为空');
+                        }
+                    } else if (data.type === 'done') {
+                        console.log('[音频播放器] 收到数据发送完成信号，等待队列播放完成');
+                        // 设置标志，表示音频数据已全部发送完成
+                        // 当队列为空且当前分片播放完成时，会发送 playback_complete
+                        if (typeof window !== 'undefined') {
+                            window.audioDataSentComplete = true;
+                        }
+                    } else {
+                        console.log('[音频播放器] 未知消息类型:', data.type);
+                    }
+                } catch (err) {
+                    console.error('[音频播放器] 处理消息失败:', err);
+                }
+            };
+
+            ws.onerror = (err) => {
+                console.error('[音频播放器] WebSocket 错误:', err);
+                updateStatus('连接错误', '');
+            };
+
+            ws.onclose = () => {
+                console.log('[音频播放器] WebSocket 已断开');
+                
+                // 如果未超过最大重连次数，尝试重连
+                if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++;
+                    const delay = Math.min(1000 * reconnectAttempts, 10000); // 递增延迟，最多10秒
+                    updateStatus(`已断开，${delay/1000}秒后重连 (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, '');
+                    console.log(`[音频播放器] ${delay/1000}秒后尝试第 ${reconnectAttempts} 次重连...`);
+                    
+                    reconnectTimer = setTimeout(() => {
+                        connectWebSocket();
+                    }, delay);
+                } else {
+                    updateStatus('连接失败，请刷新页面', '');
+                    console.error('[音频播放器] 已达到最大重连次数，停止重连');
+                }
+            };
+        }
+
+        // 页面加载时连接
+        window.addEventListener('load', () => {
+            connectWebSocket();
+        });
+
+        // 页面卸载时清理
+        window.addEventListener('beforeunload', () => {
+            if (ws) ws.close();
+            if (audioContext) audioContext.close();
+        });
+    </script>
+</body>
+</html>
+

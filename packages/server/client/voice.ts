@@ -4,6 +4,9 @@ import { EventEmitter } from 'events';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import * as http from 'http';
+import * as https from 'https';
+import { URL } from 'url';
 
 const logger = new Logger('voice-client');
 
@@ -15,11 +18,117 @@ try {
     // ws可能未安装，后续会报错
 }
 
+// 动态引入ffmpeg安装器，获取ffmpeg可执行文件路径
+let ffmpegPath: string | null = null;
+let ffprobePath: string | null = null;
+try {
+    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg');
+    ffmpegPath = ffmpegInstaller.path;
+    logger.info('已加载通过 npm 安装的 ffmpeg: %s', ffmpegPath);
+} catch {
+    // @ffmpeg-installer/ffmpeg 可能未安装，将使用系统 PATH 中的 ffmpeg
+    logger.debug('未找到 @ffmpeg-installer/ffmpeg，将使用系统 PATH 中的 ffmpeg');
+}
+
+try {
+    const ffprobeInstaller = require('@ffprobe-installer/ffprobe');
+    ffprobePath = ffprobeInstaller.path;
+    logger.info('已加载通过 npm 安装的 ffprobe: %s', ffprobePath);
+} catch {
+    // ffprobe 不是必须的，只是用来检测，不影响功能
+}
+
 export interface VoiceClientOptions {
     ws: any; // WebSocket connection
     audioFormat?: string; // 'wav', 'mp3', etc.
     sampleRate?: number;
     channels?: number;
+}
+
+/**
+ * 获取 ffmpeg 可执行文件路径
+ * 优先使用通过 npm 安装的版本，否则使用系统 PATH 中的版本
+ */
+function getFfmpegPath(): string {
+    if (ffmpegPath) {
+        return ffmpegPath;
+    }
+    return 'ffmpeg'; // fallback 到系统 PATH
+}
+
+/**
+ * 获取 ffplay 可执行文件路径
+ * ffplay 通常和 ffmpeg 在同一个目录
+ * 返回路径字符串，如果不存在则返回 null
+ */
+function getFfplayPath(): string | null {
+    if (ffmpegPath) {
+        // ffplay 通常和 ffmpeg 在同一个目录
+        const ffmpegDir = path.dirname(ffmpegPath);
+        const ffplayPath = path.join(ffmpegDir, os.platform() === 'win32' ? 'ffplay.exe' : 'ffplay');
+        // 检查文件是否存在
+        if (fs.existsSync(ffplayPath)) {
+            return ffplayPath;
+        }
+    }
+    
+    // 尝试系统 PATH 中的 ffplay（直接查找）
+    try {
+        const { execSync } = require('child_process');
+        if (os.platform() === 'win32') {
+            try {
+                const ffplayLocation = execSync('where ffplay.exe', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+                if (ffplayLocation) {
+                    return ffplayLocation.split('\n')[0]; // 取第一个结果
+                }
+            } catch {
+                // ffplay 不在 PATH 中，继续尝试从 ffmpeg 目录查找
+            }
+            
+            // 尝试查找系统 PATH 中的 ffmpeg，然后在同一目录找 ffplay
+            try {
+                const ffmpegLocation = execSync('where ffmpeg.exe', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+                if (ffmpegLocation) {
+                    const systemFfmpegPath = ffmpegLocation.split('\n')[0];
+                    const systemFfmpegDir = path.dirname(systemFfmpegPath);
+                    const systemFfplayPath = path.join(systemFfmpegDir, 'ffplay.exe');
+                    if (fs.existsSync(systemFfplayPath)) {
+                        return systemFfplayPath;
+                    }
+                }
+            } catch {
+                // 系统 PATH 中也没有 ffmpeg
+            }
+        } else {
+            try {
+                const ffplayLocation = execSync('which ffplay', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+                if (ffplayLocation) {
+                    return ffplayLocation;
+                }
+            } catch {
+                // ffplay 不在 PATH 中
+            }
+            
+            // 尝试查找系统 PATH 中的 ffmpeg，然后在同一目录找 ffplay
+            try {
+                const ffmpegLocation = execSync('which ffmpeg', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+                if (ffmpegLocation) {
+                    const systemFfmpegPath = ffmpegLocation;
+                    const systemFfmpegDir = path.dirname(systemFfmpegPath);
+                    const systemFfplayPath = path.join(systemFfmpegDir, 'ffplay');
+                    if (fs.existsSync(systemFfplayPath)) {
+                        return systemFfplayPath;
+                    }
+                }
+            } catch {
+                // 系统 PATH 中也没有 ffmpeg
+            }
+        }
+    } catch {
+        // 命令执行失败，忽略
+    }
+    
+    return null; // 找不到 ffplay
 }
 
 export class VoiceClient extends EventEmitter {
@@ -28,8 +137,41 @@ export class VoiceClient extends EventEmitter {
     private sampleRate: number;
     private channels: number;
     private recordingProcess: ChildProcess | null = null;
+    private static playbackCompleteCallbacks: Set<() => void> = new Set();
+    
+    /**
+     * 注册音频播放完成回调
+     */
+    static onPlaybackComplete(callback: () => void): void {
+        VoiceClient.playbackCompleteCallbacks.add(callback);
+    }
+    
+    /**
+     * 取消注册音频播放完成回调
+     */
+    static offPlaybackComplete(callback: () => void): void {
+        VoiceClient.playbackCompleteCallbacks.delete(callback);
+    }
+    
+    /**
+     * 通知所有注册的回调：音频播放完成
+     */
+    static notifyPlaybackComplete(): void {
+        VoiceClient.playbackCompleteCallbacks.forEach(callback => {
+            try {
+                callback();
+            } catch (err: any) {
+                logger.error('播放完成回调执行失败: %s', err.message);
+            }
+        });
+    }
     private isRecording = false;
     private conversationHistory: Array<{ role: string; content: string }> = [];
+    
+    // 公开 getter 用于外部访问
+    public get recording(): boolean {
+        return this.isRecording;
+    }
     
     // 实时ASR相关
     private realtimeAsrWs: any = null; // Qwen-ASR WebSocket连接
@@ -38,6 +180,14 @@ export class VoiceClient extends EventEmitter {
     private audioChunkQueue: Buffer[] = [];
     private isSendingAudio = false;
     private currentTranscription = '';
+    
+    // 流式音频播放相关
+    private streamingAudioProcess: ChildProcess | null = null;
+    private streamingAudioFile: string | null = null;
+    private streamingAudioChunks: Buffer[] = [];
+    private isStreamingAudio = false;
+    private streamingPlaybackTimer: NodeJS.Timeout | null = null;
+    private useWebAudioPlayer = false; // 是否使用 Web 音频播放器
 
     constructor(options: VoiceClientOptions) {
         super();
@@ -45,6 +195,15 @@ export class VoiceClient extends EventEmitter {
         this.audioFormat = options.audioFormat || 'wav';
         this.sampleRate = options.sampleRate || 16000;
         this.channels = options.channels || 1;
+
+        // 注册音频播放完成回调
+        const playbackCompleteCallback = () => {
+            this.handlePlaybackComplete();
+        };
+        VoiceClient.onPlaybackComplete(playbackCompleteCallback);
+        
+        // 保存回调引用，以便在销毁时取消注册
+        (this as any)._playbackCompleteCallback = playbackCompleteCallback;
 
         // 监听WebSocket消息
         if (this.ws && typeof this.ws.on === 'function') {
@@ -57,6 +216,10 @@ export class VoiceClient extends EventEmitter {
     private handleMessage(data: any) {
         try {
             const text = typeof data === 'string' ? data : data.toString('utf8');
+            // 处理 ping/pong 消息，不需要 JSON 解析
+            if (text === 'ping' || text === 'pong') {
+                return; // 忽略 ping/pong 消息，由 client.ts 处理
+            }
             const msg = JSON.parse(text);
             
             if (msg.key === 'voice_chat') {
@@ -64,18 +227,165 @@ export class VoiceClient extends EventEmitter {
                     logger.error('语音对话错误: %s', msg.error);
                     this.emit('error', new Error(msg.error));
                 } else if (msg.result) {
-                    const { text: transcribedText, audio, aiResponse } = msg.result;
-                    logger.info('收到语音回复，文本: %s', aiResponse);
+                    const { text: transcribedText, audio, aiResponse, streaming } = msg.result;
+                    
+                    // 显示用户输入和AI回复
+                    if (transcribedText) {
+                        logger.info('📝 用户: %s', transcribedText);
+                    }
+                    if (aiResponse) {
+                        logger.info('🤖 AI: %s', aiResponse);
+                    }
+                    
+                    // 客户端随机选择动画序列（从用户模型的10个动画中随机选择）
+                    const selectRandomAnimations = async (): Promise<Array<{ name: string; duration: number }>> => {
+                        try {
+                            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                            const vtsClient = getVTubeStudioClient();
+                            if (vtsClient && vtsClient.isConnected()) {
+                                logger.info('🎲 开始随机选择动画序列（从10个动画中）...');
+                                const hotkeys = await vtsClient.getHotkeys();
+                                if (hotkeys && hotkeys.length > 0) {
+                                    // 用户模型的10个动画关键词（用于匹配热键名称）
+                                    const targetAnimations = [
+                                        { keywords: ['开心', 'happy', '点头', 'nod'], id: 'happy_nod' },
+                                        { keywords: ['疑惑', 'confused'], id: 'confused' },
+                                        { keywords: ['摇头', 'shake', '晃脑'], id: 'shake_head_around' },
+                                        { keywords: ['害羞', '平静', 'shy'], id: 'shy' },
+                                        { keywords: ['发呆', '歪头', '思考', 'idle', 'tilt'], id: 'idle_tilt_head' },
+                                        { keywords: ['手舞足蹈', 'dance', '兴奋'], id: 'excited_dance' },
+                                        { keywords: ['眨眼', 'blink', '惊讶'], id: 'surprised_blink' },
+                                        { keywords: ['挥手', 'wave', '兴奋挥手'], id: 'excited_wave' },
+                                        { keywords: ['惊讶', 'surprised', '吃惊'], id: 'surprised' },
+                                        { keywords: ['难过', '悲伤', 'sad'], id: 'sad' },
+                                    ];
+                                    
+                                    // 从所有热键中找出匹配这10个动画的热键
+                                    const matchedHotkeys: Array<{ name: string; id: string }> = [];
+                                    for (const animation of targetAnimations) {
+                                        const matched = hotkeys.find(h => {
+                                            const nameLower = h.name.toLowerCase();
+                                            return animation.keywords.some(keyword => 
+                                                nameLower.includes(keyword.toLowerCase())
+                                            );
+                                        });
+                                        if (matched) {
+                                            matchedHotkeys.push({ name: matched.name, id: animation.id });
+                                        }
+                                    }
+                                    
+                                    if (matchedHotkeys.length > 0) {
+                                        // 将10个动画全部打乱顺序播放（顺序随机）
+                                        const shuffled = [...matchedHotkeys].sort(() => Math.random() - 0.5);
+                                        const animations = shuffled.map(h => ({
+                                            name: h.name,
+                                            duration: 3000, // 每个动画播放3秒
+                                        }));
+                                        logger.info('🎲 10个动画顺序随机播放: %s', animations.map(a => a.name).join(', '));
+                                        return animations;
+                                    } else {
+                                        logger.warn('⚠️ 未找到匹配10个动画的热键，从所有热键中随机选择');
+                                        // 如果找不到匹配的，则从所有热键中随机选择（兼容性处理）
+                                        const shuffled = [...hotkeys].sort(() => Math.random() - 0.5);
+                                        const animations = shuffled.map(h => ({
+                                            name: h.name,
+                                            duration: 3000, // 每个动画播放3秒
+                                        }));
+                                        logger.info('🎲 随机选择动画序列: %s', animations.map(a => a.name).join(', '));
+                                        return animations;
+                                    }
+                                } else {
+                                    logger.warn('⚠️ 没有可用热键，无法随机选择动画');
+                                }
+                            } else {
+                                logger.warn('⚠️ VTube Studio 未连接，无法随机选择动画');
+                            }
+                        } catch (err: any) {
+                            logger.error('随机选择动画失败: %s', err.message);
+                        }
+                        return [];
+                    };
                     
                     // 更新对话历史
                     this.conversationHistory.push({ role: 'user', content: transcribedText });
                     this.conversationHistory.push({ role: 'assistant', content: aiResponse });
                     
-                    // 播放音频
-                    if (audio) {
-                        this.playAudio(audio).catch((e) => {
+                    // 播放音频（非流式模式）
+                    if (audio && !streaming) {
+                        // 等待动画选择完成，然后开始持续触发
+                        selectRandomAnimations().then((animations) => {
+                            if (animations.length > 0) {
+                                (this as any).pendingAnimations = animations;
+                                logger.info('🎬 非流式模式：启动动画序列: %s', animations.map(a => a.name).join(', '));
+                                try {
+                                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                    const vtsClient = getVTubeStudioClient();
+                                    if (vtsClient && vtsClient.isConnected()) {
+                                        vtsClient.startContinuousAnimation(animations);
+                                    } else {
+                                        logger.warn('⚠️ VTube Studio 未连接，无法启动动画');
+                                    }
+                                } catch (err: any) {
+                                    logger.error('启动动画序列失败: %s', err.message);
+                                }
+                            } else {
+                                logger.warn('⚠️ 没有选择到动画，animations 为空');
+                            }
+                        });
+                        
+                        // 播放音频，播放完成后停止动画
+                        this.playAudio(audio).then(() => {
+                            // 播放完成，停止动画
+                            try {
+                                const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                const vtsClient = getVTubeStudioClient();
+                                if (vtsClient && vtsClient.isConnected()) {
+                                    vtsClient.stopContinuousAnimation();
+                                }
+                            } catch (err: any) {
+                                logger.debug('停止动画失败: %s', err.message);
+                            }
+                        }).catch((e) => {
                             logger.error('播放音频失败: %s', e.message);
+                            // 播放失败也要停止动画
+                            try {
+                                const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                const vtsClient = getVTubeStudioClient();
+                                if (vtsClient && vtsClient.isConnected()) {
+                                    vtsClient.stopContinuousAnimation();
+                                }
+                            } catch (err: any) {
+                                // 忽略错误
+                            }
                             this.emit('error', e);
+                        });
+                    } else if (streaming) {
+                        // 流式模式：立即初始化流式播放器（不等待动画选择）
+                        // 这样可以确保音频数据到达时能立即播放
+                        this.initStreamingPlayback();
+                        
+                        // 异步选择动画（不阻塞音频播放）
+                        selectRandomAnimations().then((animations) => {
+                            if (animations.length > 0) {
+                                (this as any).pendingAnimations = animations;
+                                logger.info('🎬 流式模式：动画序列已选择: %s', animations.map(a => a.name).join(', '));
+                                
+                                // 如果播放器已经初始化，立即启动动画
+                                try {
+                                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                                    const vtsClient = getVTubeStudioClient();
+                                    if (vtsClient && vtsClient.isConnected()) {
+                                        logger.info('🎬 流式模式：开始持续触发动画序列: %s', animations.map(a => a.name).join(', '));
+                                        vtsClient.startContinuousAnimation(animations);
+                                    }
+                                } catch (err: any) {
+                                    logger.error('启动动画序列失败: %s', err.message);
+                                }
+                            } else {
+                                logger.warn('⚠️ 流式模式：没有选择到动画');
+                            }
+                        }).catch((err) => {
+                            logger.error('流式模式：选择动画失败: %s', err.message);
                         });
                     }
                     
@@ -87,6 +397,27 @@ export class VoiceClient extends EventEmitter {
                     this.emit('error', new Error(msg.error));
                 } else if (msg.result) {
                     this.emit('transcription', msg.result.text);
+                }
+            } else if (msg.key === 'voice_chat_audio') {
+                // 处理流式音频分片（旧模式，兼容）
+                if (msg.chunk) {
+                    this.playAudioChunk(msg.chunk).catch((e) => {
+                        logger.error('播放音频分片失败: %s', e.message);
+                        this.emit('error', e);
+                    });
+                } else if (msg.done) {
+                    // 流式传输完成
+                    this.finalizeStreamingPlayback();
+                }
+            } else if (msg.key === 'voice_chat_audio_cache') {
+                // 处理缓存模式音频
+                const { audioId, url } = msg;
+                if (audioId && url) {
+                    logger.info('收到音频缓存请求: %s', audioId);
+                    this.fetchAudioFromCache(url).catch((e) => {
+                        logger.error('拉取音频缓存失败: %s', e.message);
+                        this.emit('error', e);
+                    });
                 }
             } else if (msg.key === 'voice_tts') {
                 if (msg.error) {
@@ -141,10 +472,46 @@ export class VoiceClient extends EventEmitter {
                         '-c', this.channels.toString(),
                         '-',
                     ];
+                } else if (platform === 'win32') {
+                    // Windows 使用 ffmpeg（通过 npm 安装或系统 PATH）
+                    command = getFfmpegPath();
+                    
+                    // 支持自定义设备，如果没有指定则尝试常见的设备名称
+                    // 用户可以通过环境变量 RECORDING_DEVICE 指定设备名称
+                    // 查看可用设备：ffmpeg -list_devices true -f dshow -i dummy
+                    let deviceName = 'audio="麦克风"'; // 中文系统默认
+                    const customDevice = process.env.RECORDING_DEVICE;
+                    if (customDevice) {
+                        // 如果用户已经提供了完整的格式，直接使用
+                        if (customDevice.includes('audio=')) {
+                            deviceName = customDevice;
+                        } else {
+                            // 否则添加 audio= 前缀
+                            deviceName = `audio=${customDevice}`;
+                        }
+                    }
+                    
+                    args = [
+                        '-f', 'dshow', // DirectShow 输入格式（Windows）
+                        '-i', deviceName,
+                        '-ar', this.sampleRate.toString(), // 采样率
+                        '-ac', this.channels.toString(), // 声道数
+                        '-acodec', 'pcm_s16le', // PCM 16-bit little-endian
+                        '-f', 'wav', // 输出格式
+                        '-', // 输出到 stdout
+                    ];
                 } else {
-                    // Windows 或其他平台
-                    reject(new Error(`不支持的平台: ${platform}，请安装录音工具`));
-                    return;
+                    // 其他平台尝试使用 ffmpeg（跨平台）
+                    command = getFfmpegPath();
+                    args = [
+                        '-f', 'alsa', // Linux 默认
+                        '-i', 'default',
+                        '-ar', this.sampleRate.toString(),
+                        '-ac', this.channels.toString(),
+                        '-acodec', 'pcm_s16le',
+                        '-f', 'wav',
+                        '-',
+                    ];
                 }
 
                 logger.info('开始录音...');
@@ -180,8 +547,19 @@ export class VoiceClient extends EventEmitter {
                 
                 this.recordingProcess.on('error', (err) => {
                     this.isRecording = false;
-                    logger.error('录音进程错误: %s', err.message);
-                    reject(err);
+                    const platform = os.platform();
+                    if (platform === 'win32' && (err.message.includes('spawn ffmpeg') || err.message.includes('ENOENT'))) {
+                        logger.error('录音失败: 未找到 ffmpeg 命令');
+                        logger.error('ffmpeg 将通过 npm 依赖自动安装，请运行: yarn install 或 npm install');
+                        logger.error('如果仍然失败，请手动安装 ffmpeg:');
+                        logger.error('1. 从 https://ffmpeg.org/download.html 下载 Windows 版本');
+                        logger.error('2. 解压后将 bin 目录添加到系统 PATH 环境变量');
+                        logger.error('3. 或使用 chocolatey: choco install ffmpeg');
+                        reject(new Error('未找到 ffmpeg，请运行 yarn install 安装依赖，或手动安装 ffmpeg'));
+                    } else {
+                        logger.error('录音进程错误: %s', err.message);
+                        reject(err);
+                    }
                 });
 
                 // 存储录音数据
@@ -214,8 +592,28 @@ export class VoiceClient extends EventEmitter {
 
         return new Promise((resolve, reject) => {
             try {
-                // 停止录音进程
-                this.recordingProcess!.kill('SIGINT');
+                const platform = os.platform();
+                
+                // Windows 上使用 ffmpeg 时，需要通过 stdin 发送 'q' 来优雅停止
+                // 其他平台使用 SIGINT
+                if (platform === 'win32') {
+                    try {
+                        // 尝试优雅停止（发送 'q' 到 stdin）
+                        if (this.recordingProcess!.stdin && !this.recordingProcess!.stdin.destroyed) {
+                            this.recordingProcess!.stdin.write('q');
+                            this.recordingProcess!.stdin.end();
+                        } else {
+                            // 如果 stdin 不可用，直接 kill
+                            this.recordingProcess!.kill();
+                        }
+                    } catch (e) {
+                        // 如果写入失败，直接 kill
+                        this.recordingProcess!.kill();
+                    }
+                } else {
+                    // Linux/Mac 使用 SIGINT
+                    this.recordingProcess!.kill('SIGINT');
+                }
                 
                 this.recordingProcess!.on('close', () => {
                     try {
@@ -318,10 +716,91 @@ export class VoiceClient extends EventEmitter {
                 } else if (platform === 'darwin') {
                     command = 'afplay';
                     args = [tmpFile];
+                } else if (platform === 'win32') {
+                    // Windows: 优先使用 ffplay（支持更多格式），fallback 到 PowerShell
+                    // 首先尝试 ffplay
+                    const ffplayPath = getFfplayPath();
+                    if (ffplayPath) {
+                        command = ffplayPath;
+                        args = [
+                            '-nodisp', // 不显示窗口
+                            '-autoexit', // 播放完自动退出
+                            '-loglevel', 'quiet', // 静默模式
+                            tmpFile
+                        ];
+                    } else {
+                        // ffplay 不可用，使用 PowerShell 播放（但 PowerShell 只支持 WAV）
+                        // 如果文件是 MP3 或其他格式，先用 ffmpeg 转换为 WAV
+                        if (tmpFile.endsWith('.mp3') || !tmpFile.endsWith('.wav')) {
+                            // 先用 ffmpeg 转换为 WAV
+                            const wavFile = tmpFile.replace(/\.[^.]+$/, '.wav');
+                            const ffmpegPath = getFfmpegPath();
+                            const convertProcess = spawn(ffmpegPath, [
+                                '-i', tmpFile,
+                                '-y', // 覆盖输出文件
+                                wavFile
+                            ]);
+                            
+                            convertProcess.on('close', (code) => {
+                                if (code === 0 && fs.existsSync(wavFile)) {
+                                    // 转换成功，用 PowerShell 播放
+                                    spawn('powershell', [
+                                        '-Command', `(New-Object Media.SoundPlayer "${wavFile}").PlaySync()`
+                                    ]).on('close', () => {
+                                        try {
+                                            if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
+                                            if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+                                        } catch { /* ignore */ }
+                                        resolve();
+                                    });
+                                } else {
+                                    logger.error('ffmpeg 转换失败，无法播放音频');
+                                    try {
+                                        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+                                    } catch { /* ignore */ }
+                                    reject(new Error('音频转换失败'));
+                                }
+                            });
+                            
+                            convertProcess.on('error', (err) => {
+                                logger.error('ffmpeg 转换错误: %s', err.message);
+                                try {
+                                    if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+                                } catch { /* ignore */ }
+                                reject(err);
+                            });
+                            
+                            return; // 异步处理，直接返回
+                        } else {
+                            // 已经是 WAV 格式，直接用 PowerShell 播放
+                            command = 'powershell';
+                            args = [
+                                '-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`
+                            ];
+                        }
+                    }
+                    // 如果 ffplay 可用但失败，将尝试 PowerShell（在 error 处理中）
                 } else {
-                    // Windows
-                    command = 'powershell';
-                    args = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                    // 其他平台尝试 ffplay
+                    const ffplayPath = getFfplayPath();
+                    if (ffplayPath) {
+                        command = ffplayPath;
+                        args = [
+                            '-nodisp',
+                            '-autoexit',
+                            '-loglevel', 'quiet',
+                            tmpFile
+                        ];
+                    } else {
+                        // 如果找不到 ffplay，尝试使用 ffmpeg 播放
+                        command = getFfmpegPath();
+                        args = [
+                            '-i', tmpFile,
+                            '-f', 'null',
+                            '-'
+                        ];
+                        logger.warn('未找到 ffplay，使用 ffmpeg 播放（可能没有声音输出）');
+                    }
                 }
 
                 const playProcess = spawn(command, args);
@@ -337,6 +816,39 @@ export class VoiceClient extends EventEmitter {
                 });
                 
                 playProcess.on('error', (err) => {
+                    // Windows 上如果 ffplay 失败，尝试使用 PowerShell
+                    if (platform === 'win32' && (command.includes('ffplay') || command.endsWith('ffplay.exe'))) {
+                        logger.warn('ffplay 不可用，尝试使用 PowerShell 播放');
+                        try {
+                            const psCommand = 'powershell';
+                            const psArgs = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                            const psProcess = spawn(psCommand, psArgs);
+                            
+                            psProcess.on('close', () => {
+                                try {
+                                    if (fs.existsSync(tmpFile)) {
+                                        fs.unlinkSync(tmpFile);
+                                    }
+                                } catch { /* ignore */ }
+                                resolve();
+                            });
+                            
+                            psProcess.on('error', (psErr) => {
+                                logger.error('PowerShell 播放也失败: %s', psErr.message);
+                                try {
+                                    if (fs.existsSync(tmpFile)) {
+                                        fs.unlinkSync(tmpFile);
+                                    }
+                                } catch { /* ignore */ }
+                                reject(new Error(`无法播放音频：ffplay 和 PowerShell 都不可用。请安装 ffmpeg 或确保 PowerShell 可用`));
+                            });
+                            
+                            return; // 不 reject，让 PowerShell 尝试
+                        } catch (fallbackErr) {
+                            // fallback 也失败
+                        }
+                    }
+                    
                     logger.error('播放失败: %s', err.message);
                     // 清理临时文件
                     try {
@@ -351,6 +863,40 @@ export class VoiceClient extends EventEmitter {
                 playProcess.stderr?.on('data', (data: Buffer) => {
                     const errorText = data.toString();
                     if (errorText.includes('command not found') || errorText.includes('not found')) {
+                        // Windows 上如果 ffplay 不存在，尝试 PowerShell
+                        if (platform === 'win32' && (command.includes('ffplay') || command.endsWith('ffplay.exe'))) {
+                            logger.warn('ffplay 命令不存在，尝试使用 PowerShell');
+                            playProcess.kill();
+                            
+                            try {
+                                const psCommand = 'powershell';
+                                const psArgs = ['-Command', `(New-Object Media.SoundPlayer "${tmpFile}").PlaySync()`];
+                                const psProcess = spawn(psCommand, psArgs);
+                                
+                                psProcess.on('close', () => {
+                                    try {
+                                        if (fs.existsSync(tmpFile)) {
+                                            fs.unlinkSync(tmpFile);
+                                        }
+                                    } catch { /* ignore */ }
+                                    resolve();
+                                });
+                                
+                                psProcess.on('error', (psErr) => {
+                                    logger.error('PowerShell 播放也失败: %s', psErr.message);
+                                    try {
+                                        if (fs.existsSync(tmpFile)) {
+                                            fs.unlinkSync(tmpFile);
+                                        }
+                                    } catch { /* ignore */ }
+                                    reject(new Error(`无法播放音频：ffplay 和 PowerShell 都不可用。请安装 ffmpeg 或确保 PowerShell 可用`));
+                                });
+                            } catch (fallbackErr) {
+                                reject(new Error(`播放命令不存在: ${command}，请安装 ffmpeg 或确保 PowerShell 可用`));
+                            }
+                            return;
+                        }
+                        
                         logger.error('播放命令不存在: %s', command);
                         playProcess.kill();
                         reject(new Error(`播放命令不存在: ${command}，请安装相应的播放工具`));
@@ -526,9 +1072,45 @@ export class VoiceClient extends EventEmitter {
                 '-b', '16', // 16-bit
                 '-',
             ];
+        } else if (platform === 'win32') {
+            // Windows 使用 ffmpeg 进行实时录音
+            command = getFfmpegPath();
+            // 支持自定义设备，如果没有指定则尝试常见的设备名称
+            // 用户可以通过环境变量 RECORDING_DEVICE 指定设备名称
+            // 查看可用设备：ffmpeg -list_devices true -f dshow -i dummy
+            let deviceName = 'audio="麦克风"'; // 中文系统默认
+            const customDevice = process.env.RECORDING_DEVICE;
+            if (customDevice) {
+                // 如果用户已经提供了完整的格式，直接使用
+                if (customDevice.includes('audio=')) {
+                    deviceName = customDevice;
+                } else {
+                    // 否则添加 audio= 前缀
+                    deviceName = `audio=${customDevice}`;
+                }
+            }
+            
+            args = [
+                '-f', 'dshow', // DirectShow 输入格式
+                '-i', deviceName,
+                '-ar', this.sampleRate.toString(), // 采样率
+                '-ac', this.channels.toString(), // 声道数
+                '-acodec', 'pcm_s16le', // PCM 16-bit little-endian
+                '-f', 's16le', // 输出原始 PCM 格式
+                '-', // 输出到 stdout
+            ];
         } else {
-            logger.error(`不支持的平台: ${platform}`);
-            return;
+            // 其他平台尝试使用 ffmpeg
+            command = getFfmpegPath();
+            args = [
+                '-f', 'alsa',
+                '-i', 'default',
+                '-ar', this.sampleRate.toString(),
+                '-ac', this.channels.toString(),
+                '-acodec', 'pcm_s16le',
+                '-f', 's16le',
+                '-',
+            ];
         }
 
         logger.info('开始实时音频采集...');
@@ -551,9 +1133,21 @@ export class VoiceClient extends EventEmitter {
         }
 
         this.recordingProcess.on('error', (err) => {
-            logger.error('录音进程错误: %s', err.message);
-            this.isRecording = false;
-            this.emit('error', err);
+            const platform = os.platform();
+            if (platform === 'win32' && (err.message.includes('spawn ffmpeg') || err.message.includes('ENOENT'))) {
+                logger.error('实时录音失败: 未找到 ffmpeg 命令');
+                logger.error('ffmpeg 将通过 npm 依赖自动安装，请运行: yarn install 或 npm install');
+                logger.error('如果仍然失败，请手动安装 ffmpeg:');
+                logger.error('1. 从 https://ffmpeg.org/download.html 下载 Windows 版本');
+                logger.error('2. 解压后将 bin 目录添加到系统 PATH 环境变量');
+                logger.error('3. 或使用 chocolatey: choco install ffmpeg');
+                this.isRecording = false;
+                this.emit('error', new Error('未找到 ffmpeg，请运行 yarn install 安装依赖，或手动安装 ffmpeg'));
+            } else {
+                logger.error('录音进程错误: %s', err.message);
+                this.isRecording = false;
+                this.emit('error', err);
+            }
         });
 
         this.recordingProcess.on('close', () => {
@@ -679,7 +1273,22 @@ export class VoiceClient extends EventEmitter {
 
             // 停止录音进程
             if (this.recordingProcess) {
-                this.recordingProcess.kill('SIGINT');
+                const platform = os.platform();
+                // Windows 上使用 ffmpeg 时，需要通过 stdin 发送 'q' 来优雅停止
+                if (platform === 'win32') {
+                    try {
+                        if (this.recordingProcess.stdin && !this.recordingProcess.stdin.destroyed) {
+                            this.recordingProcess.stdin.write('q');
+                            this.recordingProcess.stdin.end();
+                        } else {
+                            this.recordingProcess.kill();
+                        }
+                    } catch (e) {
+                        this.recordingProcess.kill();
+                    }
+                } else {
+                    this.recordingProcess.kill('SIGINT');
+                }
                 this.recordingProcess = null;
             }
 
@@ -715,6 +1324,481 @@ export class VoiceClient extends EventEmitter {
                 resolve();
             }
         });
+    }
+
+    /**
+     * 初始化流式音频播放
+     */
+    private initStreamingPlayback(): void {
+        // 通知 VTube Studio 开始说话并开始持续触发动画
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+            const vtsClient = getVTubeStudioClient();
+            if (vtsClient && vtsClient.isConnected()) {
+                logger.info('🎬 initStreamingPlayback: VTube Studio 已连接');
+                // 设置说话状态（用于嘴型同步）
+                if (audioSync.enabled === true) {
+                    vtsClient.setParameter('Speaking', 1.0);
+                    logger.debug('已通知 VTube Studio 开始说话');
+                }
+                
+                // 注意：动画会在后面异步启动（在 selectRandomAnimations 完成后）
+                // 这里不再处理 pendingAnimations，避免阻塞音频播放初始化
+            }
+        } catch (err: any) {
+            logger.debug('设置 VTube Studio 说话状态失败: %s', err.message);
+        }
+        // 清理之前的播放
+        if (this.streamingAudioProcess) {
+            try {
+                this.streamingAudioProcess.kill();
+            } catch { /* ignore */ }
+        }
+        
+        this.streamingAudioChunks = [];
+        this.isStreamingAudio = false;
+        
+        // 只使用 Web 音频播放器（client 模式下通过 audio-player-server）
+        try {
+            const { isPlayerConnected } = require('./audio-player-server');
+            if (isPlayerConnected && isPlayerConnected()) {
+                logger.info('使用 Web 音频播放器进行流式播放');
+                this.useWebAudioPlayer = true;
+                return;
+            }
+        } catch (err: any) {
+            // audio-player-server 可能未初始化
+            logger.debug('无法检查音频播放器状态: %s', err.message);
+        }
+        
+        // Web 播放器不可用，只记录警告，不初始化本地播放
+        logger.warn('⚠️  Web 音频播放器未连接，音频播放将被跳过。请确保客户端已启动并打开播放器页面。');
+        this.useWebAudioPlayer = false;
+    }
+
+    /**
+     * 从缓存拉取音频并流式播放
+     */
+    private async fetchAudioFromCache(url: string): Promise<void> {
+        return new Promise((resolve, reject) => {
+            try {
+                logger.info('开始HTTP拉取音频: %s', url);
+                
+                // 解析URL
+                const urlObj = new URL(url);
+                const isHttps = urlObj.protocol === 'https:';
+                const client = isHttps ? https : http;
+                
+                // 初始化流式播放器（如果还没有初始化）
+                if (!this.isStreamingAudio) {
+                    this.initStreamingPlayback();
+                }
+                
+                let buffer = Buffer.alloc(0);
+                
+                // 发起HTTP请求
+                const req = client.get(url, (res) => {
+                    if (res.statusCode !== 200) {
+                        reject(new Error(`HTTP错误: ${res.statusCode} ${res.statusMessage}`));
+                        return;
+                    }
+                    
+                    // 流式读取数据
+                    res.on('data', (chunk: Buffer) => {
+                        // 合并数据
+                        buffer = Buffer.concat([buffer, chunk]);
+                        
+                        // 每次读取到一定大小（4096字节）后播放一个chunk
+                        const chunkSize = 4096;
+                        while (buffer.length >= chunkSize) {
+                            const audioChunk = buffer.slice(0, chunkSize);
+                            buffer = buffer.slice(chunkSize);
+                            
+                            // 转换为base64并播放
+                            const base64Chunk = audioChunk.toString('base64');
+                            
+                            // 立即播放（这会发送到Web播放器）
+                            this.playAudioChunk(base64Chunk).catch((e) => {
+                                logger.warn('播放音频分片失败: %s', e.message);
+                            });
+                        }
+                    });
+                    
+                    res.on('end', () => {
+                        // 处理剩余数据
+                        if (buffer.length > 0) {
+                            // 确保是偶数长度（PCM16需要2字节对齐）
+                            const alignedLength = buffer.length % 2 === 0 ? buffer.length : buffer.length - 1;
+                            if (alignedLength > 0) {
+                                const finalChunk = buffer.slice(0, alignedLength);
+                                const base64Chunk = finalChunk.toString('base64');
+                                this.playAudioChunk(base64Chunk).catch((e) => {
+                                    logger.warn('播放最后音频分片失败: %s', e.message);
+                                });
+                            }
+                        }
+                        
+                        logger.info('音频拉取完成');
+                        
+                        // 等待播放完成
+                        setTimeout(() => {
+                            this.finalizeStreamingPlayback();
+                            resolve();
+                        }, 500);
+                    });
+                    
+                    res.on('error', (err) => {
+                        logger.error('拉取音频缓存失败: %s', err.message);
+                        reject(err);
+                    });
+                });
+                
+                req.on('error', (err) => {
+                    logger.error('HTTP请求失败: %s', err.message);
+                    reject(err);
+                });
+            } catch (error: any) {
+                logger.error('拉取音频缓存失败: %s', error.message);
+                reject(error);
+            }
+        });
+    }
+
+    /**
+     * 播放音频分片（流式）
+     */
+    private async playAudioChunk(chunkBase64: string): Promise<void> {
+        // 检查是否启用 VTube Studio 音频同步（嘴型同步）
+        // 注意：VTube Studio 只用于嘴型同步，不播放音频
+        // 音频仍需通过系统播放，以便直播软件捕获
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            // 如果启用音频同步，分析音频并发送到 VTube Studio（用于嘴型同步）
+            if (audioSync.enabled === true && chunkBase64) {
+                try {
+                    const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+                    const vtsClient = getVTubeStudioClient();
+                    if (vtsClient && vtsClient.isConnected()) {
+                        vtsClient.processAudioChunk(chunkBase64, {
+                            parameterName: audioSync.parameterName || 'VoiceVolume',
+                            minVolume: 0.0,
+                            maxVolume: 1.0,
+                        });
+                    }
+                } catch (err: any) {
+                    logger.debug('VTube Studio 音频同步失败: %s', err.message);
+                }
+            }
+        } catch (err: any) {
+            logger.debug('读取 VTube Studio 配置失败: %s', err.message);
+        }
+
+        // 注意：VTube Studio 只用于嘴型同步，不播放音频
+        // 音频仍然需要通过系统播放，这样直播软件（如 OBS）才能捕获音频
+        // 所以即使启用了 VTube Studio 音频同步，我们也需要继续播放音频到系统
+
+        // 使用 Web 音频播放器（确保音频能被直播软件捕获）
+        if (this.useWebAudioPlayer) {
+            try {
+                const { forwardAudioChunk } = require('./audio-player-server');
+                if (forwardAudioChunk && forwardAudioChunk(chunkBase64)) {
+                    // 音频分片已成功转发，不再记录日志以减少噪音
+                    return; // 成功转发
+                } else {
+                    logger.warn('Web 音频播放器转发失败，音频将被丢弃');
+                }
+            } catch (err: any) {
+                logger.warn('音频播放器转发异常: %s', err.message);
+            }
+        } else {
+            // Web 播放器未连接，只记录调试信息，不播放
+            logger.debug('Web 音频播放器未连接，音频分片被跳过');
+        }
+    }
+
+    /**
+     * 从文件启动流式播放（用于不支持管道播放的平台）
+     */
+    private startStreamingPlaybackFromFile(): void {
+        if (!this.streamingAudioFile || this.isStreamingAudio) {
+            return;
+        }
+        
+        this.isStreamingAudio = true;
+        const platform = os.platform();
+        const sampleRate = 24000;
+        
+        try {
+            if (platform === 'win32') {
+                const ffplayPath = getFfplayPath();
+                if (ffplayPath) {
+                    this.streamingAudioProcess = spawn(ffplayPath, [
+                        '-nodisp',
+                        '-autoexit',
+                        '-loglevel', 'quiet',
+                        '-f', 's16le',
+                        '-ar', sampleRate.toString(),
+                        '-ac', '1',
+                        '-i', this.streamingAudioFile
+                    ]);
+                } else {
+                    // ffplay 不可用，使用 ffmpeg 持续监控文件并转换为 WAV 播放
+                    // 因为文件还在写入中，我们需要等待写入完成
+                    const wavFile = this.streamingAudioFile.replace('.pcm', '.wav');
+                    const ffmpegPath = getFfmpegPath();
+                    
+                    // 延迟启动转换，确保有足够的数据
+                    // 使用定时器等待文件不再增长
+                    let lastSize = 0;
+                    let stableCount = 0;
+                    
+                    const checkAndConvert = () => {
+                        if (!this.streamingAudioFile || !fs.existsSync(this.streamingAudioFile)) {
+                            return;
+                        }
+                        
+                        const currentSize = fs.statSync(this.streamingAudioFile).size;
+                        
+                        if (currentSize === lastSize) {
+                            stableCount++;
+                            // 如果文件大小稳定了 3 次检查（600ms），认为写入完成
+                            if (stableCount >= 3) {
+                                // 文件已稳定，开始转换
+                                const convertProcess = spawn(ffmpegPath, [
+                                    '-f', 's16le',
+                                    '-ar', sampleRate.toString(),
+                                    '-ac', '1',
+                                    '-i', this.streamingAudioFile,
+                                    '-f', 'wav',
+                                    '-y',
+                                    wavFile
+                                ]);
+                                
+                                convertProcess.on('close', (code) => {
+                                    if (code === 0 && fs.existsSync(wavFile)) {
+                                        // 转换成功，用 PowerShell 播放
+                                        const psProcess = spawn('powershell', [
+                                            '-Command', `(New-Object Media.SoundPlayer "${wavFile}").PlaySync()`
+                                        ]);
+                                        
+                                        psProcess.on('close', () => {
+                                            // 清理文件
+                                            setTimeout(() => {
+                                                try {
+                                                    if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
+                                                } catch { /* ignore */ }
+                                            }, 1000);
+                                            this.cleanupStreamingAudio();
+                                        });
+                                        
+                                        psProcess.on('error', (err) => {
+                                            logger.error('PowerShell 播放失败: %s', err.message);
+                                            this.cleanupStreamingAudio();
+                                        });
+                                        
+                                        this.streamingAudioProcess = psProcess;
+                                    } else {
+                                        logger.error('PCM 转 WAV 失败');
+                                        this.cleanupStreamingAudio();
+                                    }
+                                });
+                                
+                                convertProcess.on('error', (err) => {
+                                    logger.error('ffmpeg 转换失败: %s', err.message);
+                                    this.cleanupStreamingAudio();
+                                });
+                                
+                                return; // 停止检查
+                            }
+                        } else {
+                            // 文件还在增长
+                            lastSize = currentSize;
+                            stableCount = 0;
+                        }
+                        
+                        // 继续检查（每 200ms 一次）
+                        setTimeout(checkAndConvert, 200);
+                    };
+                    
+                    // 首次检查，给一点时间让数据积累
+                    setTimeout(() => {
+                        if (this.streamingAudioFile && fs.existsSync(this.streamingAudioFile)) {
+                            lastSize = fs.statSync(this.streamingAudioFile).size;
+                            checkAndConvert();
+                        }
+                    }, 500);
+                    
+                    return; // 不立即返回，等待检查完成
+                }
+            } else if (platform === 'darwin') {
+                // macOS: 需要转换为 wav 格式
+                const wavFile = this.streamingAudioFile.replace('.pcm', '.wav');
+                // 使用 ffmpeg 转换并播放
+                const ffmpegPath = getFfmpegPath();
+                const convertProcess = spawn(ffmpegPath, [
+                    '-f', 's16le',
+                    '-ar', sampleRate.toString(),
+                    '-ac', '1',
+                    '-i', this.streamingAudioFile,
+                    '-f', 'wav',
+                    wavFile
+                ]);
+                
+                convertProcess.on('close', () => {
+                    if (fs.existsSync(wavFile)) {
+                        spawn('afplay', [wavFile]);
+                        // 清理文件
+                        setTimeout(() => {
+                            try {
+                                if (fs.existsSync(wavFile)) fs.unlinkSync(wavFile);
+                            } catch { /* ignore */ }
+                        }, 5000);
+                    }
+                });
+            } else {
+                // Linux
+                this.streamingAudioProcess = spawn('aplay', [
+                    '-f', 'S16_LE',
+                    '-r', sampleRate.toString(),
+                    '-c', '1',
+                    this.streamingAudioFile
+                ]);
+            }
+            
+            if (this.streamingAudioProcess) {
+                this.streamingAudioProcess.on('close', () => {
+                    this.cleanupStreamingAudio();
+                });
+            }
+        } catch (err: any) {
+            logger.error('启动流式播放失败: %s', err.message);
+            this.cleanupStreamingAudio();
+        }
+    }
+
+    /**
+     * 完成流式播放
+     */
+    private finalizeStreamingPlayback(): void {
+        // 只使用 Web 音频播放器，发送完成信号（通知前端数据已发送完成）
+        // 但不停止动画，等待前端播放器真正播放完成后再停止
+        if (this.useWebAudioPlayer) {
+            try {
+                const { sendPlaybackDone } = require('./audio-player-server');
+                if (sendPlaybackDone) {
+                    sendPlaybackDone();
+                }
+                logger.debug('已发送音频数据完成信号，等待前端播放完成后再停止动画');
+            } catch (err: any) {
+                logger.debug('发送播放完成信号失败: %s', err.message);
+            }
+            // 不立即清理，等待前端播放完成通知
+            return;
+        }
+        
+        // Web 播放器未连接，立即停止动画和清理状态
+        logger.debug('Web 音频播放器未连接，立即停止动画');
+        this.stopAnimationAndCleanup();
+    }
+
+    /**
+     * 处理音频播放完成（由 audio-player-server 通知）
+     */
+    private handlePlaybackComplete(): void {
+        if (this.useWebAudioPlayer || this.isStreamingAudio) {
+            this.stopAnimationAndCleanup();
+        }
+    }
+    
+    /**
+     * 停止动画并清理资源（在音频真正播放完成时调用）
+     */
+    private stopAnimationAndCleanup(): void {
+        // 通知 VTube Studio 停止说话并停止动画
+        try {
+            const config = require('../config').config as any;
+            const vtuberConfig = config.vtuber || {};
+            const vtsConfig = vtuberConfig.vtubestudio || {};
+            const audioSync = vtsConfig.audioSync || {};
+            
+            const { getVTubeStudioClient } = require('./vtuber-vtubestudio');
+            const vtsClient = getVTubeStudioClient();
+            if (vtsClient && vtsClient.isConnected()) {
+                // 停止持续触发动画
+                vtsClient.stopContinuousAnimation();
+                logger.info('🎬 音频播放完成，已停止动画序列');
+                
+                // 设置说话状态为 0，并重置音量参数
+                if (audioSync.enabled === true) {
+                    vtsClient.setParameter('Speaking', 0.0);
+                    const paramName = audioSync.parameterName || 'VoiceVolume';
+                    vtsClient.setParameter(paramName, 0.0);
+                    logger.debug('已通知 VTube Studio 停止说话');
+                }
+            }
+        } catch (err: any) {
+            logger.debug('重置 VTube Studio 说话状态失败: %s', err.message);
+        }
+
+        // 清理流式音频资源
+        this.cleanupStreamingAudio();
+    }
+
+    /**
+     * 清理流式音频资源
+     */
+    private cleanupStreamingAudio(): void {
+        // 注意：动画停止应该在 stopAnimationAndCleanup() 中处理
+        // 这里只清理资源，不再重复停止动画
+        // 清除启动定时器
+        if (this.streamingPlaybackTimer) {
+            clearTimeout(this.streamingPlaybackTimer);
+            this.streamingPlaybackTimer = null;
+        }
+        
+        if (this.streamingAudioProcess) {
+            try {
+                // 先尝试优雅关闭 stdin
+                if (this.streamingAudioProcess.stdin && !this.streamingAudioProcess.stdin.destroyed) {
+                    try {
+                        this.streamingAudioProcess.stdin.end();
+                    } catch { /* ignore */ }
+                }
+                // 立即 kill，不等待
+                try {
+                    this.streamingAudioProcess.kill('SIGTERM');
+                    // 如果 1 秒后还在运行，强制 kill
+                    setTimeout(() => {
+                        try {
+                            if (this.streamingAudioProcess && !this.streamingAudioProcess.killed) {
+                                this.streamingAudioProcess.kill('SIGKILL');
+                            }
+                        } catch { /* ignore */ }
+                    }, 1000);
+                } catch { /* ignore */ }
+            } catch { /* ignore */ }
+            this.streamingAudioProcess = null;
+        }
+        
+        if (this.streamingAudioFile && fs.existsSync(this.streamingAudioFile)) {
+            try {
+                fs.unlinkSync(this.streamingAudioFile);
+            } catch { /* ignore */ }
+            this.streamingAudioFile = null;
+        }
+        
+        this.streamingAudioChunks = [];
+        this.isStreamingAudio = false;
+        this.useWebAudioPlayer = false;
     }
 }
 

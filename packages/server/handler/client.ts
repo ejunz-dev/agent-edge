@@ -21,6 +21,7 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
     private pending: Map<string, { resolve: Function, reject: Function, timer: NodeJS.Timeout } > = new Map();
     private subscriptions: Subscription[] = [];
     private accepted = false;
+    conversationHistory: Array<{ role: string; content: string }> = []; // 对话历史
 
     async prepare() {
         // 允许多个客户端连接（移除单例限制以支持语音客户端等）
@@ -103,6 +104,79 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                 this.send({ ok: 1, event });
             }
             break; }
+        case 'vtuber_auth_token_save': {
+            // 保存 VTube Studio 认证令牌到数据库
+            const { host, port, authToken } = msg;
+            if (!host || !port) {
+                this.send({ key: 'vtuber_auth_token_save', error: '缺少 host 或 port' });
+                return;
+            }
+            
+            try {
+                const db = (this.ctx as any).db;
+                if (!db || !db.vtuberAuthToken) {
+                    this.send({ key: 'vtuber_auth_token_save', error: '数据库未初始化' });
+                    return;
+                }
+                
+                const docId = `${host}:${port}`;
+                const now = Date.now();
+                
+                // 查找是否已存在
+                const existing = await db.vtuberAuthToken.findOne({ _id: docId });
+                
+                if (existing) {
+                    // 更新现有记录
+                    await db.vtuberAuthToken.update(
+                        { _id: docId },
+                        { $set: { authToken: authToken || '', updatedAt: now } }
+                    );
+                } else {
+                    // 创建新记录
+                    await db.vtuberAuthToken.insert({
+                        _id: docId,
+                        host,
+                        port,
+                        authToken: authToken || '',
+                        updatedAt: now,
+                        createdAt: now,
+                    });
+                }
+                
+                this.send({ key: 'vtuber_auth_token_save', ok: 1, saved: !!authToken });
+            } catch (err: any) {
+                logger.error('保存 VTube Studio 认证令牌失败: %s', err.message);
+                this.send({ key: 'vtuber_auth_token_save', error: err.message });
+            }
+            break; }
+        case 'vtuber_auth_token_get': {
+            // 从数据库读取 VTube Studio 认证令牌
+            const { host, port } = msg;
+            if (!host || !port) {
+                this.send({ key: 'vtuber_auth_token_get', error: '缺少 host 或 port' });
+                return;
+            }
+            
+            try {
+                const db = (this.ctx as any).db;
+                if (!db || !db.vtuberAuthToken) {
+                    this.send({ key: 'vtuber_auth_token_get', error: '数据库未初始化' });
+                    return;
+                }
+                
+                const docId = `${host}:${port}`;
+                const doc = await db.vtuberAuthToken.findOne({ _id: docId });
+                
+                if (doc && doc.authToken) {
+                    this.send({ key: 'vtuber_auth_token_get', ok: 1, authToken: doc.authToken });
+                } else {
+                    this.send({ key: 'vtuber_auth_token_get', ok: 1, authToken: null });
+                }
+            } catch (err: any) {
+                logger.error('读取 VTube Studio 认证令牌失败: %s', err.message);
+                this.send({ key: 'vtuber_auth_token_get', error: err.message });
+            }
+            break; }
         case 'voice_chat': {
             // 完整语音对话流程：接收音频或文本 -> AI -> TTS -> 返回音频
             const { audio, text, format = 'wav', conversationHistory = [] } = msg;
@@ -126,50 +200,95 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                 if (text) {
                     // 文本模式：直接从AI对话开始（实时ASR已完成转录）
                     logger.info('收到文本消息，直接进行AI对话: %s', text);
-                    const aiResponse = await voiceService.chat(text, conversationHistory);
                     
                     // 检查是否使用realtime TTS（支持流式播放）
                     const voiceConfig = (config as any).voice || {};
                     const ttsConfig = voiceConfig.tts || {};
                     const model = ttsConfig.model || 'qwen3-tts-flash';
+                    const aiConfig = voiceConfig.ai || {};
+                    const endpoint = aiConfig.endpoint || '';
+                    const isWebSocket = endpoint.startsWith('ws://') || endpoint.startsWith('wss://');
                     
-                    if (model.includes('realtime')) {
-                        // 使用流式TTS：先发送初始消息，然后流式发送音频分片
-                        logger.info('使用流式TTS模式');
+                    if (model.includes('realtime') && isWebSocket) {
+                        // 使用流式AI+流式TTS：收到内容立即播放
+                        logger.info('使用流式AI+TTS模式');
                         
-                        // 先发送文本和AI回复
+                        let isFirstChunk = true;
+                        let fullAiResponse = '';
+                        
+                        // 先发送初始消息（客户端会自己随机选择动画）
                         this.send({
                             key: 'voice_chat',
                             result: {
                                 text: text,
-                                aiResponse: aiResponse,
+                                aiResponse: '', // 初始为空，后续通过流式更新
                                 audio: null, // 音频将通过流式分片发送
                                 streaming: true, // 标识这是流式传输
                             },
                         });
                         
-                        // 然后流式发送音频
-                        try {
-                            await (voiceService as any).streamTtsRealtime(
-                                aiResponse,
-                                { ...ttsConfig, voice: ttsConfig.voice || 'Cherry' },
-                                (audioChunk: Buffer) => {
-                                    // 每收到一个音频分片，立即发送给客户端
-                                    this.send({
-                                        key: 'voice_chat_audio',
-                                        chunk: audioChunk.toString('base64'),
-                                    });
+                            try {
+                                // 直接通过WebSocket流式发送音频，不使用HTTP缓存
+                                const result = await (voiceService as any).chatStreamWithTts(
+                                    text,
+                                    conversationHistory,
+                                    // onAudioChunk: 直接通过WebSocket发送音频分片
+                                    (audioChunk: Buffer) => {
+                                        this.send({
+                                            key: 'voice_chat_audio',
+                                            chunk: audioChunk.toString('base64'),
+                                        });
+                                    },
+                                    // onTextChunk: 更新文本内容
+                                    (textChunk: string) => {
+                                        fullAiResponse += textChunk;
+                                        // 实时更新AI回复（用于显示）
+                                        this.send({
+                                            key: 'voice_chat_text',
+                                            chunk: textChunk,
+                                            fullText: fullAiResponse,
+                                        });
+                                    },
+                                    false // 不使用缓存模式，直接流式发送
+                                );
+                                
+                                // 处理返回结果
+                                let finalText: string;
+                                if (typeof result === 'string') {
+                                    finalText = result;
+                                } else {
+                                    finalText = result.text;
                                 }
-                            );
+                                
+                                // 发送音频流完成信号
+                                this.send({
+                                    key: 'voice_chat_audio',
+                                    done: true,
+                                });
                             
-                            // 发送流式传输完成信号
+                            // 更新最终回复
                             this.send({
-                                key: 'voice_chat_audio',
-                                done: true,
+                                key: 'voice_chat',
+                                result: {
+                                    text: text,
+                                    aiResponse: fullAiResponse,
+                                    streaming: false,
+                                },
                             });
+                            
+                            // 更新对话历史
+                            let updatedHistory = conversationHistory || [];
+                            updatedHistory = [...updatedHistory];
+                            updatedHistory.push({ role: 'user', content: text });
+                            updatedHistory.push({ role: 'assistant', content: fullAiResponse });
+                            if (updatedHistory.length > 20) {
+                                updatedHistory = updatedHistory.slice(-20);
+                            }
+                            (this as any).conversationHistory = updatedHistory;
                         } catch (e: any) {
-                            logger.error('流式TTS失败，回退到非流式模式: %s', e.message);
+                            logger.error('流式AI+TTS失败，回退到非流式模式: %s', e.message);
                             // 回退到非流式模式
+                            const aiResponse = await voiceService.chat(text, conversationHistory);
                             const audioBuffer = await voiceService.tts(aiResponse);
                             this.send({
                                 key: 'voice_chat',
@@ -181,7 +300,8 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                             });
                         }
                     } else {
-                        // 非流式TTS：等待完整音频后发送
+                        // 非流式模式：等待完整回复后播放
+                        const aiResponse = await voiceService.chat(text, conversationHistory);
                         const audioBuffer = await voiceService.tts(aiResponse);
                         
                         result = {
@@ -201,6 +321,8 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
                     const audioBuffer = Buffer.from(audio, 'base64');
                     logger.info('收到语音消息，音频大小: %d bytes', audioBuffer.length);
                     result = await voiceService.voiceChat(audioBuffer, format, conversationHistory);
+                    
+                    // 客户端会自己随机选择动画（音频模式）
                     result.audio = result.audio.toString('base64');
                     
                     // 返回结果

@@ -132,6 +132,37 @@ export async function apply(ctx: Context) {
         }
     }
     ctx.Route('z2m-device-basic', '/zigbee2mqtt/device/:deviceId/basic', Z2MDeviceBasicHandler);
+    
+    // 工具执行 Handler：用于 Server 端调用 Node 工具
+    class Z2MToolExecuteHandler extends Handler<Context> {
+        async post() {
+            await this.ctx.inject(['zigbee'], async (c) => {
+                const svc = c.zigbee as ZigbeeHerdsmanService;
+                const body = this.request.body || {};
+                const { toolName, arguments: args } = body;
+                
+                if (!toolName) {
+                    this.response.status = 400;
+                    this.response.body = { error: '缺少 toolName 参数' };
+                    this.response.addHeader('Access-Control-Allow-Origin', '*');
+                    return;
+                }
+                
+                try {
+                    // 调用 Node 端的工具
+                    const { callNodeTool } = require('../mcp-tools/node');
+                    const result = await callNodeTool(c, { name: toolName, arguments: args || {} });
+                    this.response.body = { result };
+                } catch (e) {
+                    this.response.status = 500;
+                    this.response.body = { error: (e as Error).message };
+                }
+                this.response.addHeader('Access-Control-Allow-Origin', '*');
+            });
+        }
+    }
+    ctx.Route('z2m-tool-execute', '/zigbee2mqtt/tool/execute', Z2MToolExecuteHandler);
+    
     class Z2MListAdaptersHandler extends Handler<Context> {
         async get() {
             const svc = (this.ctx as any).zigbee as any;

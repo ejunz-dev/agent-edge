@@ -2,7 +2,8 @@
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
 import { config } from '../config';
-import Zigbee2MqttService from '../service/zigbee2mqtt';
+// Node 模式下不再使用 zigbee2mqtt service，而是直接使用 zigbee-herdsman
+import { listNodeTools } from '../mcp-tools/node';
 
 const logger = new Logger('node-client');
 
@@ -112,9 +113,37 @@ function startNodeConnecting(ctx?: Context) {
                 connectTimeout = null;
             }
 
-            // 发送初始化消息，请求 Broker 配置
+            // 发送初始化消息，包含工具列表和 Node 地址信息
             try {
-                ws.send(JSON.stringify({ type: 'init', nodeId }));
+                const tools = listNodeTools();
+                const nodeConfig = (config as any)?.node || {};
+                const nodePort = nodeConfig.port || 5284;
+                // 获取本地 IP 地址（用于 Server 调用 Node API）
+                const os = require('os');
+                const networkInterfaces = os.networkInterfaces();
+                let localIp = 'localhost';
+                for (const name of Object.keys(networkInterfaces)) {
+                    for (const iface of networkInterfaces[name] || []) {
+                        if (iface.family === 'IPv4' && !iface.internal) {
+                            localIp = iface.address;
+                            break;
+                        }
+                    }
+                    if (localIp !== 'localhost') break;
+                }
+                
+                ws.send(JSON.stringify({ 
+                    type: 'init', 
+                    nodeId,
+                    host: localIp,
+                    port: nodePort,
+                    tools: tools.map(t => ({
+                        name: t.name,
+                        description: t.description,
+                        inputSchema: t.parameters,
+                    })),
+                }));
+                logger.info('已发送 Node 工具列表，共 %d 个工具，地址: %s:%d', tools.length, localIp, nodePort);
             } catch (e) {
                 logger.error('发送初始化消息失败: %s', (e as Error).message);
             }
@@ -129,40 +158,28 @@ function startNodeConnecting(ctx?: Context) {
                 if (msg.type === 'broker-config') {
                     logger.info('收到 server Broker 配置: %s', msg.mqttUrl);
                     // 更新 zigbee2mqtt service 的 MQTT 连接配置
-                    if (ctx) {
-                        ctx.inject(['zigbee2mqtt'], (c) => {
-                            const z2mService = c.zigbee2mqtt as Zigbee2MqttService;
-                            if (z2mService) {
-                                // 重新连接 MQTT（使用 server 的 Broker）
-                                z2mService.connectToBroker(msg.mqttUrl, {
-                                    baseTopic: msg.baseTopic,
-                                    username: msg.username,
-                                    password: msg.password,
-                                }).catch((e: Error) => {
-                                    logger.error('连接 server Broker 失败: %s', e.message);
-                                });
-                            }
-                        }).catch((e: Error) => {
-                            logger.error('获取 zigbee2mqtt service 失败: %s', e.message);
-                        });
-                    }
+                    // 注意：Node 模式下使用的是 zigbee-herdsman，不是 zigbee2mqtt service
+                    // 所以这里暂时不需要处理 Broker 配置，因为 Node 使用自己的 Broker
+                    // 如果需要连接到 Server 的 Broker，可以在这里实现
                     return;
                 }
 
                 // 转发设备控制指令（如果有）
                 if (msg.type === 'device-control' && ctx) {
-                    ctx.inject(['zigbee2mqtt'], (c) => {
-                        try {
-                            const z2mService = c.zigbee2mqtt as Zigbee2MqttService;
-                            if (z2mService && msg.deviceId && msg.payload) {
-                                z2mService.setDeviceState(msg.deviceId, msg.payload).catch((e: Error) => {
-                                    logger.error('控制设备失败: %s', e.message);
-                                });
+                    try {
+                        ctx.inject(['zigbee'], async (c) => {
+                            try {
+                                const zigbeeSvc = c.zigbee;
+                                if (zigbeeSvc && msg.deviceId && msg.payload) {
+                                    await zigbeeSvc.setDeviceState(msg.deviceId, msg.payload);
+                                }
+                            } catch (e) {
+                                logger.error('控制设备失败: %s', (e as Error).message);
                             }
-                        } catch (e) {
-                            logger.error('设备控制错误: %s', (e as Error).message);
-                        }
-                    }).catch(() => {});
+                        });
+                    } catch (e) {
+                        logger.error('设备控制错误: %s', (e as Error).message);
+                    }
                 }
             } catch (e) {
                 logger.warn('解析 server 消息失败: %s', (e as Error).message);

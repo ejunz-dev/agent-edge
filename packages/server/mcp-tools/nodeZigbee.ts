@@ -7,7 +7,7 @@ const logger = new Logger('node-mcp-zigbee');
 // 列出所有 Zigbee 设备
 export const zigbeeListDevicesTool = {
     name: 'zigbee_list_devices',
-    description: '列出所有可用的 Zigbee 设备（开关、插座等），返回设备的基本信息和标识符',
+    description: '列出所有可用的 Zigbee 设备（开关、插座等），返回设备的基本信息和标识符。当用户询问"有哪些设备"、"设备列表"、"查看设备"等问题时，应该主动调用此工具。当需要查询或控制设备但用户没有指定设备ID时，也应该先调用此工具获取设备列表。',
     parameters: {
         type: 'object',
         properties: {},
@@ -48,13 +48,13 @@ export async function callZigbeeListDevicesTool(ctx: Context, args: any): Promis
 // 获取设备状态
 export const zigbeeGetDeviceStatusTool = {
     name: 'zigbee_get_device_status',
-    description: '获取指定 Zigbee 设备的当前状态（开关状态、在线状态等）',
+    description: '获取指定 Zigbee 设备的当前状态（开关状态、在线状态等）。当用户询问"开关状态"、"设备状态"、"什么情况"、"开还是关"、"是否开启"等问题时，应该主动调用此工具查询设备状态。如果用户没有明确指定设备ID，应该先调用 zigbee_list_devices 获取设备列表，如果只有一个设备则使用该设备的 deviceId，如果有多个设备则询问用户要查询哪个设备。',
     parameters: {
         type: 'object',
         properties: {
             deviceId: {
                 type: 'string',
-                description: '设备 IEEE 地址或友好名称，例如 "0xa4c1388b3518f6ce"',
+                description: '设备 IEEE 地址或友好名称。如果用户没有明确指定，应该从上下文或最近查询的设备中获取。如果只有一个设备，直接使用该设备的 deviceId。可通过 zigbee_list_devices 获取设备列表。',
             },
         },
         required: ['deviceId'],

@@ -35,8 +35,11 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/edge')),
             c.plugin(require('./handler/client')),
             c.plugin(require('./handler/asr-proxy')),
+                c.plugin(require('./handler/zigbee2mqtt')),
             c.plugin(require('./handler/audio-player')),
             c.plugin(require('./handler/audio-cache')),
+            // 暂时注释掉 server 端的 node handler
+            // c.plugin(require('./handler/node')),
         ]);
         c.server.listen();
     });
@@ -50,10 +53,34 @@ function applyClient(ctx: Context) {
     ctx.plugin(require('./client/audio-player-server'));
 }
 
+function applyNode(ctx: Context) {
+    // Node 模式：启动 WebService + Zigbee2MQTT + 控制台 + 内置 Broker
+    ctx.plugin(require('./service/server'));
+    // 内置 MQTT Broker（Aedes）
+    const brokerSvc = require('./service/broker');
+    ctx.plugin(brokerSvc.default || brokerSvc);
+    // 直接使用 zigbee-herdsman（库模式，无需独立进程）
+    const zigbeeSvc = require('./service/zigbee-herdsman');
+    ctx.plugin(zigbeeSvc.default || zigbeeSvc);
+    ctx.inject(['server'], (c) => {
+        c.plugin(require('./handler/zigbee2mqtt'));
+        c.plugin(require('./handler/zigbee-console'));
+        c.server.listen();
+    });
+    // node client（可选，如果配置了 server 才会连接）
+    // 如果只想本地工作，不配置 server 字段或设置为空字符串即可
+    // 暂时注释掉与 server 的连接逻辑
+    // if ((config as any).server) {
+    //     ctx.plugin(require('./client/node'));
+    // }
+}
+
 async function apply(ctx) {
     (global as any).__cordis_ctx = ctx;
     if (process.argv.includes('--client')) {
         applyClient(ctx);
+    } else if (process.argv.includes('--node')) {
+        applyNode(ctx);
     } else {
         ctx.plugin(DBService);
         ctx.inject(['dbservice'], (c) => {

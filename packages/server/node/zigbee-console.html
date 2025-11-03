@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zigbee 控制台</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 8px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    h1 { margin-bottom: 24px; color: #333; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .status-card { background: #f8f9fa; padding: 16px; border-radius: 6px; border-left: 4px solid #007bff; }
+    .status-card h3 { font-size: 14px; color: #666; margin-bottom: 8px; }
+    .status-card .value { font-size: 18px; font-weight: 600; color: #333; }
+    .status-card .value.ok { color: #28a745; }
+    .status-card .value.bad { color: #dc3545; }
+    .pairing-section { background: #f8f9fa; padding: 16px; border-radius: 6px; margin-bottom: 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .pairing-section input { padding: 8px 12px; border: 1px solid #ddd; border-radius: 4px; width: 80px; }
+    button { padding: 8px 16px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    button.secondary { background: #6c757d; }
+    button.secondary:hover { background: #5a6268; }
+    button.success { background: #28a745; }
+    button.success:hover { background: #218838; }
+    button.danger { background: #dc3545; }
+    button.danger:hover { background: #c82333; }
+    .devices-table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+    .devices-table th, .devices-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+    .devices-table th { background: #f8f9fa; font-weight: 600; color: #333; }
+    .devices-table tr:hover { background: #f8f9fa; }
+    .devices-table .actions { display: flex; gap: 8px; }
+    .ws-status { position: fixed; top: 10px; right: 10px; padding: 8px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .ws-status.connected { background: #28a745; color: white; }
+    .ws-status.disconnected { background: #dc3545; color: white; }
+    .ws-status.connecting { background: #ffc107; color: #333; }
+    .error-message { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 4px; margin-bottom: 16px; display: none; }
+    .error-message.show { display: block; }
+  </style>
+</head>
+<body>
+  <div class="ws-status disconnected" id="wsStatus">未连接</div>
+  <div class="container">
+    <h1>Zigbee 控制台</h1>
+    <div class="error-message" id="errorMsg"></div>
+    <div class="status-grid">
+      <div class="status-card"><h3>Zigbee 状态</h3><div class="value" id="z2mStatus">-</div></div>
+      <div class="status-card"><h3>协调器 IEEE 地址</h3><div class="value" id="coord">-</div></div>
+      <div class="status-card"><h3>配对状态</h3><div class="value" id="permitStatus">-</div></div>
+    </div>
+    <div class="pairing-section">
+      <label>配对窗口(s):</label>
+      <input type="number" id="joinTime" value="120" min="10" max="600">
+      <button class="success" onclick="window.permitJoin(true)">开启配对</button>
+      <button class="secondary" onclick="window.permitJoin(false)">关闭配对</button>
+    </div>
+    <h2>设备列表</h2>
+    <table class="devices-table">
+      <thead>
+        <tr><th>地址/ID</th><th>名称</th><th>型号</th><th>类型</th><th>操作</th></tr>
+      </thead>
+      <tbody id="devicesBody"></tbody>
+    </table>
+  </div>
+  <script>
+    (function() {
+      let ws = null;
+      let reconnectTimer = null;
+      const reconnectDelay = 3000;
+      const wsStatus = document.getElementById('wsStatus');
+      const errorMsg = document.getElementById('errorMsg');
+      function updateWsStatus(status, text) { wsStatus.className = 'ws-status ' + status; wsStatus.textContent = text; }
+      function showError(msg) { errorMsg.textContent = msg; errorMsg.classList.add('show'); setTimeout(() => errorMsg.classList.remove('show'), 5000); }
+      function connect() {
+        if (ws && ws.readyState === WebSocket.OPEN) return;
+        updateWsStatus('connecting', '连接中...');
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/zigbee-ws`;
+        ws = new WebSocket(wsUrl);
+        ws.onopen = () => { updateWsStatus('connected', '已连接'); if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+          ws.send(JSON.stringify({ type: 'getStatus' }));
+          ws.send(JSON.stringify({ type: 'getCoordinator' }));
+          ws.send(JSON.stringify({ type: 'getPermitStatus' }));
+          ws.send(JSON.stringify({ type: 'getDevices' })); };
+        ws.onmessage = (event) => { try { const msg = JSON.parse(event.data); handleMessage(msg); } catch (e) { console.error('Parse message failed:', e); } };
+        ws.onerror = (error) => { console.error('WebSocket error:', error); updateWsStatus('disconnected', '连接错误'); };
+        ws.onclose = () => { updateWsStatus('disconnected', '已断开'); if (!reconnectTimer) { reconnectTimer = setTimeout(connect, reconnectDelay); } };
+      }
+      function handleMessage(msg) {
+        switch (msg.type) {
+          case 'status': updateStatus(msg); break;
+          case 'coordinator': updateCoordinator(msg.coordinator); break;
+          case 'permitStatus': updatePermitStatus(msg); break;
+          case 'devices': updateDevices(msg.devices || []); break;
+          case 'controlResult': if (!msg.success) showError('控制失败: ' + (msg.error || '未知错误')); break;
+          case 'error': showError(msg.message || '未知错误'); break;
+        }
+      }
+      function updateStatus(msg) { const el = document.getElementById('z2mStatus'); if (el) { el.textContent = msg.connected ? '已连接' : '未连接'; el.className = msg.connected ? 'value ok' : 'value bad'; } }
+      function updateCoordinator(coord) { const el = document.getElementById('coord'); if (el) el.textContent = coord?.ieee_address || '-'; }
+      function updatePermitStatus(msg) { const el = document.getElementById('permitStatus'); if (el) { if (msg.enabled) { el.textContent = '配对中 ' + msg.remaining + 's'; el.className = 'value ok'; } else { el.textContent = '已关闭'; el.className = 'value bad'; } } }
+      function updateDevices(devices) {
+        const tbody = document.getElementById('devicesBody'); if (!tbody) return; tbody.innerHTML = '';
+        if (devices.length === 0) { const tr = document.createElement('tr'); tr.innerHTML = '<td colspan="5" style="text-align: center; color: #999;">暂无设备</td>'; tbody.appendChild(tr); return; }
+        for (const d of devices) { 
+          const tr = document.createElement('tr'); 
+          const id = d.friendly_name || d.ieee_address || ''; 
+          const typeName = d.type === 'Router' ? '路由器' : (d.type === 'EndDevice' ? '终端设备' : (d.type || '未知'));
+          const encodedId = encodeURIComponent(id);
+          tr.innerHTML = 
+            '<td>' + escapeHtml(d.ieee_address || '') + '</td>' + 
+            '<td>' + escapeHtml(d.friendly_name || '') + '</td>' + 
+            '<td>' + escapeHtml((d.definition && d.definition.model) || '') + '</td>' + 
+            '<td>' + escapeHtml(typeName) + '</td>' + 
+            '<td class="actions">' + 
+              '<a href="/zigbee2mqtt/device/' + encodedId + '?state=ON" class="success" style="display:inline-block;padding:8px 16px;border-radius:4px;background:#28a745;color:white;text-decoration:none;margin-right:8px;" onclick="event.preventDefault();controlDevice(\'' + escapeHtml(id) + '\', \'ON\');return false;">开</a>' + 
+              '<a href="/zigbee2mqtt/device/' + encodedId + '?state=OFF" class="danger" style="display:inline-block;padding:8px 16px;border-radius:4px;background:#dc3545;color:white;text-decoration:none;" onclick="event.preventDefault();controlDevice(\'' + escapeHtml(id) + '\', \'OFF\');return false;">关</a>' + 
+            '</td>'; 
+          tbody.appendChild(tr); 
+        }
+      }
+      function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+      window.permitJoin = function(enabled) { if (!ws || ws.readyState !== WebSocket.OPEN) { showError('WebSocket 未连接'); return; } const time = Number(document.getElementById('joinTime').value || 120); ws.send(JSON.stringify({ type: 'permitJoin', payload: { value: enabled, time } })); };
+      window.controlDevice = async function(deviceId, state) {
+        console.log('[zigbee-console] 控制设备:', deviceId, state);
+        try {
+          const url = '/zigbee2mqtt/device/' + encodeURIComponent(deviceId);
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ state: state })
+          });
+          if (!response.ok) {
+            const err = await response.json().catch(() => ({ error: response.statusText }));
+            throw new Error(err.error || '操作失败');
+          }
+          const result = await response.json();
+          if (result.ok) {
+            console.log('[zigbee-console] 控制成功');
+            // 刷新设备列表
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'getDevices' }));
+            }
+          } else {
+            showError('控制失败: ' + (result.error || '未知错误'));
+          }
+        } catch (e) {
+          console.error('[zigbee-console] 控制失败:', e);
+          showError('控制失败: ' + (e.message || String(e)));
+        }
+      };
+      connect();
+      document.addEventListener('visibilitychange', () => { if (!document.hidden && (!ws || ws.readyState !== WebSocket.OPEN)) connect(); });
+    })();
+  </script>
+</body>
+</html>

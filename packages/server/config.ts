@@ -9,7 +9,8 @@ const logger = new Logger('init');
 
 logger.info('Loading config');
 const isClient = process.argv.includes('--client');
-const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : 'server'}.yaml`);
+const isNode = process.argv.includes('--node');
+const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : isNode ? 'node' : 'server'}.yaml`);
 fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
 // eslint-disable-next-line import/no-mutable-exports
@@ -54,11 +55,33 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 #     apiKey: ''
 #     endpoint: 'https://api.openai.com/v1/chat/completions'
 #     model: 'gpt-3.5-turbo'
+# Zigbee2MQTT（可选）
+# zigbee2mqtt:
+#   enabled: false
+#   mqttUrl: 'mqtt://localhost:1883'
+#   baseTopic: 'zigbee2mqtt'
+#   username: ''
+#   password: ''
+#   autoStart: false
+#   adapter: '/dev/ttyUSB0'
+`;
+        const nodeConfigDefault = `\
+# 控制节点（Node）配置，仅负责 Zigbee2MQTT 管理与设备控制桥接
+server: 'ws://localhost:5283' # 或 'ws://192.168.1.10:5283'，用于连接到 server
+port: 5283
+zigbee2mqtt:
+  enabled: true
+  mqttUrl: 'mqtt://localhost:1883' # 仅作为后备，优先使用 server 提供的 Broker
+  baseTopic: 'zigbee2mqtt'
+  username: ''
+  password: ''
+  autoStart: true # node 启动时自动拉起 zigbee2mqtt 进程
+  adapter: '/dev/ttyUSB0'
 `;
         const clientConfigDefault = yaml.dump({
             server: '',
         });
-        fs.writeFileSync(configPath, isClient ? clientConfigDefault : serverConfigDefault);
+        fs.writeFileSync(configPath, isClient ? clientConfigDefault : isNode ? nodeConfigDefault : serverConfigDefault);
         logger.error('Config file generated, please fill in the config.yaml');
         resolve();
     })());
@@ -195,12 +218,56 @@ const serverSchema = Schema.object({
         keyboard: { listenKey: 'Backquote', modifiers: [] },
         vtuber: { enabled: true, engine: 'vtubestudio', vtubestudio: { host: '127.0.0.1', port: 8001, apiName: 'Agent Edge VTuber Control', apiVersion: '1.0', authToken: '', audioSync: { enabled: false, useForPlayback: false, parameterName: 'VoiceVolume', updateInterval: 100 } }, osc: { enabled: false, host: '127.0.0.1', port: 9000 } },
     }),
+    // Zigbee2MQTT 配置
+    zigbee2mqtt: Schema.object({
+        enabled: Schema.boolean().default(false),
+        mqttUrl: Schema.string().default('mqtt://localhost:1883'),
+        baseTopic: Schema.string().default('zigbee2mqtt'),
+        username: Schema.string().default(''),
+        password: Schema.string().default(''),
+        autoStart: Schema.boolean().default(false),
+        adapter: Schema.string().default('/dev/ttyUSB0'),
+    }).default({
+        enabled: false,
+        mqttUrl: 'mqtt://localhost:1883',
+        baseTopic: 'zigbee2mqtt',
+        username: '',
+        password: '',
+        autoStart: false,
+        adapter: '/dev/ttyUSB0',
+    }),
 }).description('Basic Config');
 const clientSchema = Schema.object({
     server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
 });
 
-export const config = (isClient ? clientSchema : serverSchema)(yaml.load(fs.readFileSync(configPath, 'utf8')) as any);
+const nodeSchema = Schema.object({
+    port: Schema.number().default(5283),
+    server: Schema.string().default('ws://localhost:5283'),
+    broker: Schema.object({
+        enabled: Schema.boolean().default(true),
+        port: Schema.number().default(1883),
+    }).default({ enabled: true, port: 1883 }),
+    zigbee2mqtt: Schema.object({
+        enabled: Schema.boolean().default(true),
+        mqttUrl: Schema.string().default('mqtt://localhost:1883'),
+        baseTopic: Schema.string().default('zigbee2mqtt'),
+        username: Schema.string().default(''),
+        password: Schema.string().default(''),
+        autoStart: Schema.boolean().default(true), // node 模式下默认自动启动
+        adapter: Schema.string().default('/dev/ttyUSB0'),
+    }).default({
+        enabled: true,
+        mqttUrl: 'mqtt://localhost:1883',
+        baseTopic: 'zigbee2mqtt',
+        username: '',
+        password: '',
+        autoStart: true,
+        adapter: '/dev/ttyUSB0',
+    }),
+}).description('Node Config');
+
+export const config = (isClient ? clientSchema : isNode ? nodeSchema : serverSchema)(yaml.load(fs.readFileSync(configPath, 'utf8')) as any);
 export const saveConfig = () => {
     fs.writeFileSync(configPath, yaml.dump(config));
 };

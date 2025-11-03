@@ -9,6 +9,7 @@
   "scripts": {
     "dev:client": "node -r ./register.js packages/server/index.ts --client --debug",
     "dev:server": "node -r ./register.js packages/server/index.ts --debug",
+    "dev:node": "node -r ./register.js packages/server/index.ts --debug --node",
     "test:voice": "node -r ./register.js packages/server/client/test-voice.ts",
     "lint": "eslint packages --ext js,ts,tsx,jsx",
     "build": "yarn build:ui && node -r ./register.js build.ts",

@@ -164,6 +164,6 @@ class ZigbeeConsolePage extends Handler<Context> {
 }
 
 export async function apply(ctx: Context) {
-    ctx.Route('zigbee-console', '/zigbee-console', ZigbeeConsolePage);
+    ctx.Route('zigbee-console', '/', ZigbeeConsolePage);
     ctx.Connection('zigbee-console-ws', '/zigbee-ws', ZigbeeConsoleConnectionHandler);
 }

@@ -22,8 +22,20 @@ export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
             const dispose2 = c.on('zigbee2mqtt/devices', () => {
                 void this.refreshDevices();
             });
-            const dispose3 = c.on('zigbee2mqtt/deviceState', () => {
-                void this.refreshDevices();
+            // 实时推送单个设备状态更新（而不是刷新整个列表）
+            const dispose3 = c.on('zigbee2mqtt/deviceState', async (deviceId: string, state: any) => {
+                // 获取更新后的设备信息
+                await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+                    const svc = c.zigbee2mqtt as Zigbee2MqttService;
+                    const devices = await svc.listDevices();
+                    const device = devices.find((d: any) => 
+                        (d.friendly_name === deviceId) || (d.ieee_address === deviceId)
+                    );
+                    if (device) {
+                        // 发送单个设备状态更新
+                        this.send({ type: 'deviceState', deviceId, device, state });
+                    }
+                });
             });
             this.subscriptions.push({ dispose: dispose1 }, { dispose: dispose2 }, { dispose: dispose3 });
         });

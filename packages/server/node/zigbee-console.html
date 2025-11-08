@@ -35,8 +35,20 @@
     .devices-table th, .devices-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
     .devices-table th { background: #f8f9fa; font-weight: 600; color: #333; }
     .devices-table tr:hover { background: #f8f9fa; }
-    .devices-table .actions { display: flex; gap: 8px; }
-    .ws-status { position: fixed; top: 10px; right: 10px; padding: 8px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .devices-table .actions { display: flex; gap: 8px; align-items: center; }
+    .devices-table .state-info { font-size: 12px; color: #666; margin-right: 8px; }
+    .devices-table .state-info .state-badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 500; }
+    .devices-table .state-info .state-badge.on { background: #d4edda; color: #155724; }
+    .devices-table .state-info .state-badge.off { background: #f8d7da; color: #721c24; }
+    /* 滑动开关样式 */
+    .toggle-switch { position: relative; display: inline-block; width: 50px; height: 26px; }
+    .toggle-switch input { opacity: 0; width: 0; height: 0; }
+    .toggle-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: 0.3s; border-radius: 26px; }
+    .toggle-slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background-color: white; transition: 0.3s; border-radius: 50%; }
+    .toggle-switch input:checked + .toggle-slider { background-color: #28a745; }
+    .toggle-switch input:checked + .toggle-slider:before { transform: translateX(24px); }
+    .toggle-switch input:disabled + .toggle-slider { opacity: 0.5; cursor: not-allowed; }
+    .ws-status { position: fixed; top: 10px; right: 10px; padding: 8px 12px; border-radius: 4px; font-size: 12px; font-weight: 600; z-index: 1000; }
     .ws-status.connected { background: #28a745; color: white; }
     .ws-status.disconnected { background: #dc3545; color: white; }
     .ws-status.connecting { background: #ffc107; color: #333; }
@@ -63,7 +75,7 @@
     <h2>设备列表</h2>
     <table class="devices-table">
       <thead>
-        <tr><th>地址/ID</th><th>名称</th><th>型号</th><th>类型</th><th>操作</th></tr>
+        <tr><th>地址/ID</th><th>名称</th><th>型号</th><th>类型</th><th>状态</th><th>操作</th></tr>
       </thead>
       <tbody id="devicesBody"></tbody>
     </table>
@@ -92,12 +104,15 @@
         ws.onerror = (error) => { console.error('WebSocket error:', error); updateWsStatus('disconnected', '连接错误'); };
         ws.onclose = () => { updateWsStatus('disconnected', '已断开'); if (!reconnectTimer) { reconnectTimer = setTimeout(connect, reconnectDelay); } };
       }
+      let devicesMap = new Map(); // 存储设备数据，用于实时更新
+      
       function handleMessage(msg) {
         switch (msg.type) {
           case 'status': updateStatus(msg); break;
           case 'coordinator': updateCoordinator(msg.coordinator); break;
           case 'permitStatus': updatePermitStatus(msg); break;
           case 'devices': updateDevices(msg.devices || []); break;
+          case 'deviceState': updateDeviceState(msg.deviceId, msg.device, msg.state); break; // 实时更新单个设备状态
           case 'controlResult': if (!msg.success) showError('控制失败: ' + (msg.error || '未知错误')); break;
           case 'error': showError(msg.message || '未知错误'); break;
         }
@@ -105,24 +120,86 @@
       function updateStatus(msg) { const el = document.getElementById('z2mStatus'); if (el) { el.textContent = msg.connected ? '已连接' : '未连接'; el.className = msg.connected ? 'value ok' : 'value bad'; } }
       function updateCoordinator(coord) { const el = document.getElementById('coord'); if (el) el.textContent = coord?.ieee_address || '-'; }
       function updatePermitStatus(msg) { const el = document.getElementById('permitStatus'); if (el) { if (msg.enabled) { el.textContent = '配对中 ' + msg.remaining + 's'; el.className = 'value ok'; } else { el.textContent = '已关闭'; el.className = 'value bad'; } } }
+      function getDeviceState(device) {
+        // 从设备状态中获取开关状态
+        if (device && device.state) {
+          if (device.state.state === 'ON' || device.state.state === 'OFF') {
+            return device.state.state;
+          }
+          // 兼容其他状态字段
+          if (device.state.power === 'ON' || device.state.power === 'OFF') {
+            return device.state.power;
+          }
+        }
+        return null;
+      }
+      
+      function renderDeviceRow(device) {
+        const id = device.friendly_name || device.ieee_address || '';
+        const typeName = device.type === 'Router' ? '路由器' : (device.type === 'EndDevice' ? '终端设备' : (device.type || '未知'));
+        const state = getDeviceState(device);
+        const isOn = state === 'ON';
+        const stateText = state || '未知';
+        const stateClass = isOn ? 'on' : 'off';
+        
+        return '<td>' + escapeHtml(device.ieee_address || '') + '</td>' + 
+               '<td>' + escapeHtml(device.friendly_name || '') + '</td>' + 
+               '<td>' + escapeHtml((device.definition && device.definition.model) || '') + '</td>' + 
+               '<td>' + escapeHtml(typeName) + '</td>' + 
+               '<td class="state-info">' + 
+                 '<span class="state-badge ' + stateClass + '">' + escapeHtml(stateText) + '</span>' + 
+               '</td>' + 
+               '<td class="actions">' + 
+                 '<label class="toggle-switch">' + 
+                   '<input type="checkbox" ' + (isOn ? 'checked' : '') + ' onchange="toggleDevice(\'' + escapeHtml(id) + '\', this.checked)" />' + 
+                   '<span class="toggle-slider"></span>' + 
+                 '</label>' + 
+               '</td>';
+      }
+      
       function updateDevices(devices) {
-        const tbody = document.getElementById('devicesBody'); if (!tbody) return; tbody.innerHTML = '';
-        if (devices.length === 0) { const tr = document.createElement('tr'); tr.innerHTML = '<td colspan="5" style="text-align: center; color: #999;">暂无设备</td>'; tbody.appendChild(tr); return; }
+        const tbody = document.getElementById('devicesBody'); 
+        if (!tbody) return; 
+        
+        // 更新设备映射
+        devicesMap.clear();
+        for (const d of devices) {
+          const id = d.friendly_name || d.ieee_address || '';
+          devicesMap.set(id, d);
+        }
+        
+        tbody.innerHTML = '';
+        if (devices.length === 0) { 
+          const tr = document.createElement('tr'); 
+          tr.innerHTML = '<td colspan="6" style="text-align: center; color: #999;">暂无设备</td>'; 
+          tbody.appendChild(tr); 
+          return; 
+        }
+        
         for (const d of devices) { 
           const tr = document.createElement('tr'); 
-          const id = d.friendly_name || d.ieee_address || ''; 
-          const typeName = d.type === 'Router' ? '路由器' : (d.type === 'EndDevice' ? '终端设备' : (d.type || '未知'));
-          const encodedId = encodeURIComponent(id);
-          tr.innerHTML = 
-            '<td>' + escapeHtml(d.ieee_address || '') + '</td>' + 
-            '<td>' + escapeHtml(d.friendly_name || '') + '</td>' + 
-            '<td>' + escapeHtml((d.definition && d.definition.model) || '') + '</td>' + 
-            '<td>' + escapeHtml(typeName) + '</td>' + 
-            '<td class="actions">' + 
-              '<a href="/zigbee2mqtt/device/' + encodedId + '?state=ON" class="success" style="display:inline-block;padding:8px 16px;border-radius:4px;background:#28a745;color:white;text-decoration:none;margin-right:8px;" onclick="event.preventDefault();controlDevice(\'' + escapeHtml(id) + '\', \'ON\');return false;">开</a>' + 
-              '<a href="/zigbee2mqtt/device/' + encodedId + '?state=OFF" class="danger" style="display:inline-block;padding:8px 16px;border-radius:4px;background:#dc3545;color:white;text-decoration:none;" onclick="event.preventDefault();controlDevice(\'' + escapeHtml(id) + '\', \'OFF\');return false;">关</a>' + 
-            '</td>'; 
+          tr.id = 'device-' + escapeHtml((d.friendly_name || d.ieee_address || '').replace(/[^a-zA-Z0-9]/g, '_'));
+          tr.innerHTML = renderDeviceRow(d);
           tbody.appendChild(tr); 
+        }
+      }
+      
+      function updateDeviceState(deviceId, device, state) {
+        // 实时更新单个设备的状态
+        const id = device.friendly_name || device.ieee_address || deviceId;
+        const rowId = 'device-' + escapeHtml(id.replace(/[^a-zA-Z0-9]/g, '_'));
+        const row = document.getElementById(rowId);
+        
+        if (row) {
+          // 更新设备数据
+          devicesMap.set(id, device);
+          // 重新渲染该行
+          row.innerHTML = renderDeviceRow(device);
+        } else {
+          // 如果设备不存在，刷新整个列表
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'getDevices' }));
+          }
         }
       }
       function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
@@ -143,10 +220,7 @@
           const result = await response.json();
           if (result.ok) {
             console.log('[zigbee-console] 控制成功');
-            // 刷新设备列表
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'getDevices' }));
-            }
+            // 不立即刷新，等待实时状态更新
           } else {
             showError('控制失败: ' + (result.error || '未知错误'));
           }
@@ -154,6 +228,11 @@
           console.error('[zigbee-console] 控制失败:', e);
           showError('控制失败: ' + (e.message || String(e)));
         }
+      };
+      
+      window.toggleDevice = async function(deviceId, checked) {
+        const state = checked ? 'ON' : 'OFF';
+        await window.controlDevice(deviceId, state);
       };
       connect();
       document.addEventListener('visibilitychange', () => { if (!document.hidden && (!ws || ws.readyState !== WebSocket.OPEN)) connect(); });

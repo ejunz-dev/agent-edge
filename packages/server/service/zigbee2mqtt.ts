@@ -12,6 +12,7 @@ export interface Zigbee2MqttState {
     connected: boolean;
     lastError?: string;
     devices: DeviceInfo[];
+    deviceStates: Map<string, any>; // 存储设备实时状态
 }
 
 declare module 'cordis' {
@@ -26,7 +27,7 @@ export default class Zigbee2MqttService extends Service {
         ctx.mixin('zigbee2mqtt', []);
     }
 
-    public state: Zigbee2MqttState = { connected: false, devices: [] };
+    public state: Zigbee2MqttState = { connected: false, devices: [], deviceStates: new Map() };
     private client?: import('mqtt').MqttClient;
     private readonly logger = new Logger('z2m');
     private readonly baseTopic = config.zigbee2mqtt?.baseTopic || 'zigbee2mqtt';
@@ -176,7 +177,10 @@ export default class Zigbee2MqttService extends Service {
 
         const parts = topic.split('/');
         if (parts[0] === this.baseTopic && parts[1] && parts[1] !== 'bridge') {
-            try { this.ctx.parallel('zigbee2mqtt/deviceState', parts[1], data); } catch {}
+            const deviceId = parts[1];
+            // 存储设备状态
+            this.state.deviceStates.set(deviceId, data);
+            try { this.ctx.parallel('zigbee2mqtt/deviceState', deviceId, data); } catch {}
         }
         // 处理设备列表更新（zigbee2mqtt 直接发布到 bridge/devices）
         if (topic === `${this.baseTopic}/bridge/devices`) {
@@ -288,11 +292,21 @@ export default class Zigbee2MqttService extends Service {
             }
         }
         // 过滤掉 Coordinator（网关本身），只返回真正的终端设备
-        return devices.filter((d: any) => {
+        const filteredDevices = devices.filter((d: any) => {
             const type = d.type || '';
             const friendlyName = (d.friendly_name || '').toLowerCase();
             // 排除 Coordinator 类型的设备，以及名称包含 "coordinator" 的设备
             return type !== 'Coordinator' && !friendlyName.includes('coordinator');
+        });
+        
+        // 合并设备状态信息
+        return filteredDevices.map((d: any) => {
+            const deviceId = d.friendly_name || d.ieee_address;
+            const state = this.state.deviceStates.get(deviceId);
+            if (state) {
+                return { ...d, state };
+            }
+            return d;
         });
     }
 

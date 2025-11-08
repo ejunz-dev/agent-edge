@@ -61,6 +61,9 @@ function applyNode(ctx: Context) {
     // 使用 zigbee2mqtt 服务（通过 MQTT 控制设备）
     const zigbee2mqttSvc = require('./service/zigbee2mqtt');
     ctx.plugin(zigbee2mqttSvc.default || zigbee2mqttSvc);
+    // MQTT 桥接服务（支持连接多个 broker）
+    const mqttBridgeSvc = require('./service/mqtt-bridge');
+    ctx.plugin(mqttBridgeSvc.default || mqttBridgeSvc);
     ctx.inject(['server'], (c) => {
         c.plugin(require('./handler/zigbee2mqtt'));
         c.plugin(require('./handler/zigbee-console'));

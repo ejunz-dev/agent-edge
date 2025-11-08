@@ -267,6 +267,21 @@ const nodeSchema = Schema.object({
         port: Schema.number().default(1883),
         wsPort: Schema.number().default(8083),
     }).default({ enabled: true, port: 1883, wsPort: 8083 }),
+    // MQTT 桥接配置（支持连接多个 broker）
+    mqttBridge: Schema.object({
+        enabled: Schema.boolean().default(true),
+        brokers: Schema.array(Schema.object({
+            name: Schema.string().required(),
+            mqttUrl: Schema.string().required(),
+            baseTopic: Schema.string().default('zigbee2mqtt'),
+            username: Schema.string().default(''),
+            password: Schema.string().default(''),
+            enabled: Schema.boolean().default(true),
+        })).default([]),
+    }).default({
+        enabled: true,
+        brokers: [],
+    }),
     zigbee2mqtt: Schema.object({
         enabled: Schema.boolean().default(true),
         mqttUrl: Schema.string().default('mqtt://localhost:1883'),

@@ -197,6 +197,8 @@ export default class BrokerService extends Service<Context> {
         
         aedes.on('publish', (p: any, c: any) => {
             if (p?.topic?.startsWith('$SYS')) return;
+            // 过滤掉来自桥接客户端的发布日志，避免日志爆炸
+            if (c?.id && c.id.startsWith('bridge_')) return;
             this.logger.debug?.('publish %s bytes=%s by=%s', p?.topic, p?.payload?.length || 0, c?.id || '-');
         });
     }

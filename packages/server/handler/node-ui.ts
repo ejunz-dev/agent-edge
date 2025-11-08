@@ -18,11 +18,11 @@ class NodeUIHomeHandler extends Handler<Context> {
             this.response.body = context;
         } else {
             this.response.type = 'text/html';
-            // 检查是否是开发模式（通过检查是否有 webpack-dev-server 运行）
-            // 在开发模式下，webpack-dev-server 在 8081 端口，直接提供 main.js
             // 在生产模式下，从 /node-ui/main.js 加载
-            const isDev = process.env.NODE_ENV === 'development' || process.env.DEV === 'true';
-            const scriptPath = isDev ? '/main.js' : `/node-ui/main.js?${randomHash}`;
+            // 检查构建文件是否存在，如果不存在则提示需要构建
+            const bundlePath = path.resolve(__dirname, '../data/static.node-ui');
+            const hasBundle = fs.existsSync(bundlePath);
+            const scriptPath = hasBundle ? `/node-ui/main.js?${randomHash}` : '/main.js';
             const html = `<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Node Dashboard - @Ejunz/agent-edge</title></head><body><div id="root"></div><script>window.Context=JSON.parse('${JSON.stringify(context).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}')</script><script src="${scriptPath}"></script></body></html>`;
             this.response.body = html;
         }

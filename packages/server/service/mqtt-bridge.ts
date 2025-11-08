@@ -138,7 +138,8 @@ export default class MqttBridgeService extends Service<Context> {
 
                 // 订阅设备控制指令主题（只订阅控制指令，不订阅状态，避免循环）
                 const controlTopic = `${baseTopic}/+/set`;
-                client.subscribe(controlTopic, (err: Error) => {
+                this.logger.info(`[${brokerName}] 准备订阅主题: ${controlTopic}`);
+                client.subscribe(controlTopic, { qos: 0 }, (err: Error) => {
                     if (err) {
                         this.logger.error(`订阅失败 [${brokerName}]: ${err.message}`);
                     } else {
@@ -180,13 +181,13 @@ export default class MqttBridgeService extends Service<Context> {
                         }
                     }
 
-                    // 只记录第一次收到的控制指令
-                    if (!lastProcessed) {
-                        this.logger.info(`收到控制指令 [${brokerName}]: ${topic} -> ${payloadStr}`);
-                    }
+                    // 记录收到的控制指令（包括重复的，用于调试）
+                    this.logger.info(`收到控制指令 [${brokerName}]: ${topic} -> ${payloadStr}, deviceId: ${deviceId}`);
 
                     // 执行设备控制
+                    this.logger.debug(`准备执行设备控制: deviceId=${deviceId}, payload=${JSON.stringify(payload)}`);
                     await this.executeDeviceControl(deviceId, payload);
+                    this.logger.debug(`设备控制执行完成: deviceId=${deviceId}`);
 
                     // 将控制指令转发到其他 broker（避免循环）
                     await this.forwardToOtherBrokers(brokerName, topic, message);
@@ -205,9 +206,32 @@ export default class MqttBridgeService extends Service<Context> {
             });
 
             client.on('reconnect', () => {
-                // 只有在启用重连时才记录日志
-                if (reconnectEnabled) {
+                // 检查当前配置，如果 broker 已被禁用，则停止重连
+                const bridgeConf = (config as any).mqttBridge || {};
+                const brokers = bridgeConf.brokers || [];
+                const currentBroker = brokers.find((b: any) => b.name === brokerName);
+                
+                // 如果 broker 不存在、已禁用，或者全局禁用，则停止重连
+                if (!currentBroker || currentBroker.enabled === false || bridgeConf.enabled === false) {
+                    this.logger.info(`Broker [${brokerName}] 已禁用，停止重连`);
+                    client.end(true);
+                    this.clients.delete(brokerName);
+                    return;
+                }
+                
+                // 检查重连配置
+                const globalReconnect = bridgeConf.reconnect || { enabled: true, period: 5000 };
+                const brokerReconnectConfig = currentBroker.reconnect || globalReconnect;
+                const currentReconnectEnabled = brokerReconnectConfig.enabled !== false;
+                
+                // 只有在启用重连时才记录日志和继续重连
+                if (currentReconnectEnabled) {
                     this.logger.info(`正在重连 Broker [${brokerName}]...`);
+                } else {
+                    // 如果重连被禁用，停止客户端
+                    this.logger.info(`Broker [${brokerName}] 重连已禁用，停止连接`);
+                    client.end(true);
+                    this.clients.delete(brokerName);
                 }
             });
 
@@ -221,6 +245,7 @@ export default class MqttBridgeService extends Service<Context> {
 
     private async executeDeviceControl(deviceId: string, payload: any): Promise<void> {
         try {
+            this.logger.info(`[executeDeviceControl] 开始执行: deviceId=${deviceId}, payload=${JSON.stringify(payload)}`);
             await this.ctx.inject(['zigbee2mqtt'], async (c) => {
                 const z2mSvc = c.zigbee2mqtt;
                 if (!z2mSvc || typeof z2mSvc.setDeviceState !== 'function') {
@@ -228,14 +253,12 @@ export default class MqttBridgeService extends Service<Context> {
                     return;
                 }
 
-                // 减少日志输出，只在调试时记录
-                // this.logger.info(`执行设备控制: ${deviceId}, 命令: ${JSON.stringify(payload)}`);
+                this.logger.info(`[executeDeviceControl] 调用 setDeviceState: deviceId=${deviceId}, payload=${JSON.stringify(payload)}`);
                 await z2mSvc.setDeviceState(deviceId, payload);
-                // 减少日志输出
-                // this.logger.success(`设备控制执行成功: ${deviceId}`);
+                this.logger.success(`[executeDeviceControl] 设备控制执行成功: ${deviceId}`);
             });
         } catch (e) {
-            this.logger.error(`执行设备控制失败: ${(e as Error).message}`);
+            this.logger.error(`[executeDeviceControl] 执行设备控制失败: ${(e as Error).message}`, e);
             throw e;
         }
     }
@@ -360,7 +383,14 @@ export default class MqttBridgeService extends Service<Context> {
         for (const [brokerName, client] of this.clients.entries()) {
             try {
                 if (client) {
+                    // 移除所有事件监听器，防止重连
+                    client.removeAllListeners();
+                    // 强制断开连接，不自动重连
                     client.end(true);
+                    // 如果客户端有重连定时器，清除它
+                    if (client.reconnectTimer) {
+                        clearTimeout(client.reconnectTimer);
+                    }
                     this.logger.info(`已断开 Broker 连接: ${brokerName}`);
                 }
             } catch (e) {

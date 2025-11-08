@@ -9,6 +9,7 @@ import MqttBridgeService from '../service/mqtt-bridge';
 // 获取配置Schema信息（声明的配置）
 class ConfigSchemaHandler extends Handler<Context> {
     noCheckPermView = true;
+    allowCors = true;
     async get() {
         // 定义schema信息（与config.ts中的定义保持一致）
         const schemaInfo = {
@@ -50,18 +51,14 @@ class ConfigSchemaHandler extends Handler<Context> {
     }
 }
 
-// 获取当前存储的配置
-class ConfigGetHandler extends Handler<Context> {
+// 获取/更新配置（合并到一个 handler，支持 GET 和 POST）
+class ConfigHandler extends Handler<Context> {
     noCheckPermView = true;
+    allowCors = true;
     async get() {
         const bridgeConf = (config as any).mqttBridge || {};
         this.response.body = { config: bridgeConf };
     }
-}
-
-// 更新配置
-class ConfigUpdateHandler extends Handler<Context> {
-    noCheckPermView = true;
     async post() {
         try {
             const newConfig = this.request.body;
@@ -88,16 +85,30 @@ class ConfigUpdateHandler extends Handler<Context> {
     }
 }
 
-// 重新加载配置
+// 重新加载配置（支持传入新配置，先保存再重载）
 class ConfigReloadHandler extends Handler<Context> {
     noCheckPermView = true;
+    allowCors = true;
     async post() {
         try {
+            // 如果请求体中有配置，先更新并保存
+            if (this.request.body && typeof this.request.body === 'object') {
+                const newConfig = this.request.body;
+                // 更新配置
+                (config as any).mqttBridge = {
+                    ...((config as any).mqttBridge || {}),
+                    ...newConfig,
+                };
+                // 保存到文件
+                saveConfig();
+            }
+            
+            // 然后重新加载配置
             await this.ctx.inject(['mqttBridge'], async (c) => {
                 const svc = c.mqttBridge as MqttBridgeService;
                 if (svc && typeof svc.reloadConfig === 'function') {
                     await svc.reloadConfig();
-                    this.response.body = { success: true, message: '配置已重新加载' };
+                    this.response.body = { success: true, message: '配置已保存并重新加载' };
                 } else {
                     this.response.status = 500;
                     this.response.body = { error: 'MQTT Bridge 服务未初始化' };
@@ -113,6 +124,7 @@ class ConfigReloadHandler extends Handler<Context> {
 // 获取配置状态（包括连接状态）
 class ConfigStatusHandler extends Handler<Context> {
     noCheckPermView = true;
+    allowCors = true;
     async get() {
         try {
             await this.ctx.inject(['mqttBridge'], async (c) => {
@@ -154,8 +166,7 @@ class MqttBridgeConfigPage extends Handler<Context> {
 export async function apply(ctx: Context) {
     ctx.Route('mqtt-bridge-config-page', '/mqtt-bridge-config', MqttBridgeConfigPage);
     ctx.Route('mqtt-bridge-config-schema', '/api/mqtt-bridge-config/schema', ConfigSchemaHandler);
-    ctx.Route('mqtt-bridge-config-get', '/api/mqtt-bridge-config', ConfigGetHandler);
-    ctx.Route('mqtt-bridge-config-update', '/api/mqtt-bridge-config', ConfigUpdateHandler);
+    ctx.Route('mqtt-bridge-config', '/api/mqtt-bridge-config', ConfigHandler);
     ctx.Route('mqtt-bridge-config-reload', '/api/mqtt-bridge-config/reload', ConfigReloadHandler);
     ctx.Route('mqtt-bridge-config-status', '/api/mqtt-bridge-config/status', ConfigStatusHandler);
 }

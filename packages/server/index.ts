@@ -65,10 +65,11 @@ function applyNode(ctx: Context) {
     const mqttBridgeSvc = require('./service/mqtt-bridge');
     ctx.plugin(mqttBridgeSvc.default || mqttBridgeSvc);
     ctx.inject(['server'], (c) => {
+        // node-ui 先注册，确保根路径指向 React Dashboard
+        c.plugin(require('./handler/node-ui'));
         c.plugin(require('./handler/zigbee2mqtt'));
         c.plugin(require('./handler/mqtt-bridge-config'));
-        c.plugin(require('./handler/node-ui'));
-        c.plugin(require('./handler/zigbee-console')); // 最后注册，避免路由冲突
+        c.plugin(require('./handler/zigbee-console'));
         c.server.listen();
     });
     // node client（仅用于本地 MQTT Broker 连接）

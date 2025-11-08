@@ -246,7 +246,15 @@ export default class MqttBridgeService extends Service<Context> {
     private async executeDeviceControl(deviceId: string, payload: any): Promise<void> {
         try {
             this.logger.info(`[executeDeviceControl] 开始执行: deviceId=${deviceId}, payload=${JSON.stringify(payload)}`);
-            await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            
+            // 使用全局 ctx 或当前 ctx，确保在异步事件中也能正常工作
+            const ctx = (global as any).__cordis_ctx || this.ctx;
+            if (!ctx) {
+                this.logger.error('无法获取 Cordis 上下文');
+                return;
+            }
+            
+            await ctx.inject(['zigbee2mqtt'], async (c) => {
                 const z2mSvc = c.zigbee2mqtt;
                 if (!z2mSvc || typeof z2mSvc.setDeviceState !== 'function') {
                     this.logger.error('Zigbee2MQTT 服务未初始化或不支持设备控制');

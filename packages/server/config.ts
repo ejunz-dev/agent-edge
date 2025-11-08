@@ -67,11 +67,18 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 `;
         const nodeConfigDefault = `\
 # 控制节点（Node）配置，仅负责 Zigbee2MQTT 管理与设备控制桥接
-server: 'ws://localhost:5283' # 或 'ws://192.168.1.10:5283'，用于连接到 server
-port: 5283
+port: 5284
+# 上游服务器WebSocket连接地址（用于主动连接上游服务器）
+upstream: 'ws://localhost:5283' # 例如 'ws://192.168.1.10:5283' 或 'wss://example.com'
+# 上游MQTT Broker配置（不是本项目的server）
+mqtt:
+  mqttUrl: 'mqtt://localhost:1883' # 上游MQTT Broker地址
+  baseTopic: 'zigbee2mqtt'
+  username: ''
+  password: ''
 zigbee2mqtt:
   enabled: true
-  mqttUrl: 'mqtt://localhost:1883' # 仅作为后备，优先使用 server 提供的 Broker
+  mqttUrl: 'mqtt://localhost:1883' # 连接到上游MQTT Broker（优先使用mqtt配置）
   baseTopic: 'zigbee2mqtt'
   username: ''
   password: ''
@@ -243,7 +250,18 @@ const clientSchema = Schema.object({
 
 const nodeSchema = Schema.object({
     port: Schema.number().default(5283),
-    server: Schema.string().default('ws://localhost:5283'),
+    upstream: Schema.string().default('ws://localhost:5283'), // 上游服务器WebSocket连接地址
+    mqtt: Schema.object({
+        mqttUrl: Schema.string().default('mqtt://localhost:1883'),
+        baseTopic: Schema.string().default('zigbee2mqtt'),
+        username: Schema.string().default(''),
+        password: Schema.string().default(''),
+    }).default({
+        mqttUrl: 'mqtt://localhost:1883',
+        baseTopic: 'zigbee2mqtt',
+        username: '',
+        password: '',
+    }),
     broker: Schema.object({
         enabled: Schema.boolean().default(true),
         port: Schema.number().default(1883),

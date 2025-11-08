@@ -58,9 +58,9 @@ function applyNode(ctx: Context) {
     // 内置 MQTT Broker（Aedes）
     const brokerSvc = require('./service/broker');
     ctx.plugin(brokerSvc.default || brokerSvc);
-    // 直接使用 zigbee-herdsman（库模式，无需独立进程）
-    const zigbeeSvc = require('./service/zigbee-herdsman');
-    ctx.plugin(zigbeeSvc.default || zigbeeSvc);
+    // 使用 zigbee2mqtt 服务（通过 MQTT 控制设备）
+    const zigbee2mqttSvc = require('./service/zigbee2mqtt');
+    ctx.plugin(zigbee2mqttSvc.default || zigbee2mqttSvc);
     ctx.inject(['server'], (c) => {
         c.plugin(require('./handler/zigbee2mqtt'));
         c.plugin(require('./handler/zigbee-console'));

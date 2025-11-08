@@ -2,7 +2,7 @@
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
 import { config } from '../config';
-// Node 模式下不再使用 zigbee2mqtt service，而是直接使用 zigbee-herdsman
+// Node 模式下使用 zigbee2mqtt service（通过 MQTT 控制设备）
 import { listNodeTools } from '../mcp-tools/node';
 
 const logger = new Logger('node-client');
@@ -158,20 +158,34 @@ function startNodeConnecting(ctx?: Context) {
                 if (msg.type === 'broker-config') {
                     logger.info('收到 server Broker 配置: %s', msg.mqttUrl);
                     // 更新 zigbee2mqtt service 的 MQTT 连接配置
-                    // 注意：Node 模式下使用的是 zigbee-herdsman，不是 zigbee2mqtt service
-                    // 所以这里暂时不需要处理 Broker 配置，因为 Node 使用自己的 Broker
-                    // 如果需要连接到 Server 的 Broker，可以在这里实现
+                    if (ctx) {
+                        try {
+                            ctx.inject(['zigbee2mqtt'], async (c) => {
+                                const z2mSvc = c.zigbee2mqtt;
+                                if (z2mSvc && typeof z2mSvc.connectToBroker === 'function') {
+                                    await z2mSvc.connectToBroker(msg.mqttUrl, {
+                                        baseTopic: msg.baseTopic || 'zigbee2mqtt',
+                                        username: msg.username || '',
+                                        password: msg.password || '',
+                                    });
+                                    logger.info('已更新 zigbee2mqtt 连接到上游 Broker: %s', msg.mqttUrl);
+                                }
+                            });
+                        } catch (e) {
+                            logger.warn('更新 zigbee2mqtt Broker 配置失败: %s', (e as Error).message);
+                        }
+                    }
                     return;
                 }
 
                 // 转发设备控制指令（如果有）
                 if (msg.type === 'device-control' && ctx) {
                     try {
-                        ctx.inject(['zigbee'], async (c) => {
+                        ctx.inject(['zigbee2mqtt'], async (c) => {
                             try {
-                                const zigbeeSvc = c.zigbee;
-                                if (zigbeeSvc && msg.deviceId && msg.payload) {
-                                    await zigbeeSvc.setDeviceState(msg.deviceId, msg.payload);
+                                const z2mSvc = c.zigbee2mqtt;
+                                if (z2mSvc && msg.deviceId && msg.payload) {
+                                    await z2mSvc.setDeviceState(msg.deviceId, msg.payload);
                                 }
                             } catch (e) {
                                 logger.error('控制设备失败: %s', (e as Error).message);

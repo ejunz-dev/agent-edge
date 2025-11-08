@@ -1,12 +1,12 @@
 // @ts-nocheck
 import { Context } from 'cordis';
 import { Handler } from '@ejunz/framework';
-import ZigbeeHerdsmanService from '../service/zigbee-herdsman';
+import Zigbee2MqttService from '../service/zigbee2mqtt';
 
 class Z2MStatusHandler extends Handler<Context> {
     async get() {
-        await this.ctx.inject(['zigbee'], (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             this.response.body = {
                 connected: svc?.state.connected || false,
                 error: svc?.state.lastError || '',
@@ -19,8 +19,8 @@ class Z2MStatusHandler extends Handler<Context> {
 
 class Z2MDevicesHandler extends Handler<Context> {
     async get() {
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             const list = svc ? await svc.listDevices() : [];
             this.response.body = { devices: list };
             this.response.addHeader('Access-Control-Allow-Origin', '*');
@@ -30,8 +30,8 @@ class Z2MDevicesHandler extends Handler<Context> {
 
 class Z2MControlHandler extends Handler<Context> {
     async post(deviceId: string) {
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             try {
                 const paramsId = (this as any).request?.params?.deviceId;
                 const id = typeof paramsId === 'string' ? paramsId : (typeof deviceId === 'string' ? deviceId : String(paramsId || deviceId || ''));
@@ -50,8 +50,8 @@ class Z2MControlHandler extends Handler<Context> {
 
 class Z2MPermitJoinHandler extends Handler<Context> {
     async post() {
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             const body = this.request.body || {};
             const value = !!body.value;
             const time = Number(body.time || 120);
@@ -69,39 +69,37 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-permit', '/zigbee2mqtt/permit_join', Z2MPermitJoinHandler);
     class Z2MCoordinatorHandler extends Handler<Context> {
         async get() {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const info = await (svc as any).getCoordinator?.();
-                this.response.body = { coordinator: info };
-                this.response.addHeader('Access-Control-Allow-Origin', '*');
-            });
+            // zigbee2mqtt 服务不提供 coordinator 信息，返回空
+            this.response.body = { coordinator: null };
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
     ctx.Route('z2m-coordinator', '/zigbee2mqtt/coordinator', Z2MCoordinatorHandler);
     class Z2MPermitStatusHandler extends Handler<Context> {
         async get() {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const status = (svc as any).getPermitStatus?.();
-                this.response.body = status || { enabled: false, remaining: 0 };
-                this.response.addHeader('Access-Control-Allow-Origin', '*');
-            });
+            // zigbee2mqtt 服务不提供 permit status，返回默认值
+            this.response.body = { enabled: false, remaining: 0 };
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
     ctx.Route('z2m-permit-status', '/zigbee2mqtt/permit_status', Z2MPermitStatusHandler);
 
     class Z2MDeviceDebugHandler extends Handler<Context> {
         async get(deviceId: string) {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
+            await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+                const svc = c.zigbee2mqtt as Zigbee2MqttService;
                 // 确保 deviceId 是字符串
                 const id = typeof deviceId === 'string' ? deviceId : String(deviceId || '');
-                const info = await (svc as any).getDeviceDebug?.(id);
-                if (info && Object.keys(info).length && !info.error) {
-                    this.response.body = info;
+                const devices = await svc.listDevices();
+                const device = devices.find((d: any) => 
+                    d.friendly_name === id || 
+                    d.ieee_address === id ||
+                    String(d.friendly_name).toLowerCase() === String(id).toLowerCase()
+                );
+                if (device) {
+                    this.response.body = device;
                 } else {
-                    const known = await (svc as any).listDevices?.();
-                    this.response.body = { error: 'not_found', deviceId: id, known };
+                    this.response.body = { error: 'not_found', deviceId: id, known: devices };
                 }
                 this.response.addHeader('Access-Control-Allow-Origin', '*');
             });
@@ -110,25 +108,17 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-device-debug', '/zigbee2mqtt/device/:deviceId/debug', Z2MDeviceDebugHandler);
     class Z2MDeviceLqiHandler extends Handler<Context> {
         async get(deviceId: string) {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const id = typeof deviceId === 'string' ? deviceId : String(deviceId || '');
-                const info = await (svc as any).getDeviceLqi?.(id);
-                this.response.body = info || {};
-                this.response.addHeader('Access-Control-Allow-Origin', '*');
-            });
+            // zigbee2mqtt 服务不提供 LQI 信息
+            this.response.body = { error: 'not_supported' };
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
     ctx.Route('z2m-device-lqi', '/zigbee2mqtt/device/:deviceId/lqi', Z2MDeviceLqiHandler);
     class Z2MDeviceBasicHandler extends Handler<Context> {
         async get(deviceId: string) {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const id = typeof deviceId === 'string' ? deviceId : String(deviceId || '');
-                const info = await (svc as any).getDeviceBasic?.(id);
-                this.response.body = info || {};
-                this.response.addHeader('Access-Control-Allow-Origin', '*');
-            });
+            // zigbee2mqtt 服务不提供 basic 信息
+            this.response.body = { error: 'not_supported' };
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
     ctx.Route('z2m-device-basic', '/zigbee2mqtt/device/:deviceId/basic', Z2MDeviceBasicHandler);
@@ -136,38 +126,34 @@ export async function apply(ctx: Context) {
     // 工具执行 Handler：用于 Server 端调用 Node 工具
     class Z2MToolExecuteHandler extends Handler<Context> {
         async post() {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const body = this.request.body || {};
-                const { toolName, arguments: args } = body;
-                
-                if (!toolName) {
-                    this.response.status = 400;
-                    this.response.body = { error: '缺少 toolName 参数' };
-                    this.response.addHeader('Access-Control-Allow-Origin', '*');
-                    return;
-                }
-                
-                try {
-                    // 调用 Node 端的工具
-                    const { callNodeTool } = require('../mcp-tools/node');
-                    const result = await callNodeTool(c, { name: toolName, arguments: args || {} });
-                    this.response.body = { result };
-                } catch (e) {
-                    this.response.status = 500;
-                    this.response.body = { error: (e as Error).message };
-                }
+            const body = this.request.body || {};
+            const { toolName, arguments: args } = body;
+            
+            if (!toolName) {
+                this.response.status = 400;
+                this.response.body = { error: '缺少 toolName 参数' };
                 this.response.addHeader('Access-Control-Allow-Origin', '*');
-            });
+                return;
+            }
+            
+            try {
+                // 调用 Node 端的工具
+                const { callNodeTool } = require('../mcp-tools/node');
+                const result = await callNodeTool(this.ctx, { name: toolName, arguments: args || {} });
+                this.response.body = { result };
+            } catch (e) {
+                this.response.status = 500;
+                this.response.body = { error: (e as Error).message };
+            }
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
     ctx.Route('z2m-tool-execute', '/zigbee2mqtt/tool/execute', Z2MToolExecuteHandler);
     
     class Z2MListAdaptersHandler extends Handler<Context> {
         async get() {
-            const svc = (this.ctx as any).zigbee as any;
-            const list = svc?.listCandidateSerialPorts?.() || [];
-            this.response.body = { candidates: list };
+            // zigbee2mqtt 服务不提供适配器列表
+            this.response.body = { candidates: [] };
             this.response.addHeader('Access-Control-Allow-Origin', '*');
         }
     }
@@ -175,30 +161,17 @@ export async function apply(ctx: Context) {
     
     class Z2MAllDevicesRawHandler extends Handler<Context> {
         async get() {
-            await this.ctx.inject(['zigbee'], async (c) => {
-                const svc = c.zigbee as ZigbeeHerdsmanService;
-                const herdsman = (svc as any).herdsman;
-                if (!herdsman) {
-                    this.response.body = { error: 'not_connected' };
-                    this.response.addHeader('Access-Control-Allow-Origin', '*');
-                    return;
-                }
-                const all = herdsman.getDevices?.() || [];
+            await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+                const svc = c.zigbee2mqtt as Zigbee2MqttService;
+                const devices = await svc.listDevices();
                 this.response.body = {
-                    count: all.length,
-                    devices: all.map((d: any) => ({
-                        ieeeAddr: d.ieeeAddr,
+                    count: devices.length,
+                    devices: devices.map((d: any) => ({
+                        ieee_address: d.ieee_address,
+                        friendly_name: d.friendly_name,
                         type: d.type,
-                        interviewCompleted: d.interviewCompleted,
+                        definition: d.definition,
                         lastSeen: d.lastSeen,
-                        endpoints: (d.endpoints || []).map((ep: any) => ({
-                            id: ep?.ID,
-                            inputClusters: ep?.getInputClusters?.() || ep?.inputClusters || [],
-                        })),
-                        definition: d.definition ? {
-                            model: d.definition.model,
-                            vendor: d.definition.vendor,
-                        } : null,
                     })),
                 };
                 this.response.addHeader('Access-Control-Allow-Origin', '*');
@@ -206,7 +179,6 @@ export async function apply(ctx: Context) {
         }
     }
     ctx.Route('z2m-all-raw', '/zigbee2mqtt/all_devices_raw', Z2MAllDevicesRawHandler);
-    // 移除进程管理接口（不再需要，因为直接作为库使用）
 }
 
 

@@ -3,7 +3,7 @@ import { Handler, ConnectionHandler } from '@ejunz/framework';
 import { Context } from 'cordis';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import ZigbeeHerdsmanService from '../service/zigbee-herdsman';
+import Zigbee2MqttService from '../service/zigbee2mqtt';
 
 // WebSocket Handler：实时推送设备状态
 export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
@@ -14,15 +14,15 @@ export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
         ZigbeeConsoleConnectionHandler.active.add(this);
         this.send({ type: 'connected' });
         
-        // 订阅 zigbee 事件
-        await this.ctx.inject(['zigbee'], (c) => {
-            const dispose1 = c.on('zigbee/connected', () => {
+        // 订阅 zigbee2mqtt 事件
+        await this.ctx.inject(['zigbee2mqtt'], (c) => {
+            const dispose1 = c.on('zigbee2mqtt/connected', () => {
                 this.send({ type: 'status', connected: true });
             });
-            const dispose2 = c.on('zigbee/deviceJoined', (device: any) => {
+            const dispose2 = c.on('zigbee2mqtt/devices', () => {
                 void this.refreshDevices();
             });
-            const dispose3 = c.on('zigbee/deviceLeave', () => {
+            const dispose3 = c.on('zigbee2mqtt/deviceState', () => {
                 void this.refreshDevices();
             });
             this.subscriptions.push({ dispose: dispose1 }, { dispose: dispose2 }, { dispose: dispose3 });
@@ -44,8 +44,8 @@ export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
         if (!msg || typeof msg !== 'object') return;
         const { type, payload } = msg;
         
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             
             switch (type) {
                 case 'getStatus':
@@ -97,8 +97,8 @@ export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
     }
 
     private async sendStatus() {
-        await this.ctx.inject(['zigbee'], (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             this.send({ 
                 type: 'status', 
                 connected: svc?.state.connected || false,
@@ -108,24 +108,18 @@ export class ZigbeeConsoleConnectionHandler extends ConnectionHandler<Context> {
     }
 
     private async sendCoordinator() {
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
-            const coord = await (svc as any).getCoordinator?.();
-            this.send({ type: 'coordinator', coordinator: coord });
-        });
+        // zigbee2mqtt 服务不提供 coordinator 信息
+        this.send({ type: 'coordinator', coordinator: null });
     }
 
     private async sendPermitStatus() {
-        await this.ctx.inject(['zigbee'], (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
-            const status = (svc as any).getPermitStatus?.();
-            this.send({ type: 'permitStatus', ...(status || { enabled: false, remaining: 0 }) });
-        });
+        // zigbee2mqtt 服务不提供 permit status
+        this.send({ type: 'permitStatus', enabled: false, remaining: 0 });
     }
 
     private async refreshDevices() {
-        await this.ctx.inject(['zigbee'], async (c) => {
-            const svc = c.zigbee as ZigbeeHerdsmanService;
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
             const devices = await svc.listDevices();
             this.send({ type: 'devices', devices });
         });

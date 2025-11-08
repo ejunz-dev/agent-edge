@@ -19,10 +19,10 @@ export async function callZigbeeListDevicesTool(ctx: Context, args: any): Promis
     logger.info('[zigbee_list_devices] 开始列出设备');
     let devices: any[] = [];
     
-    await ctx.inject(['zigbee'], async (c) => {
-        const svc = c.zigbee;
+    await ctx.inject(['zigbee2mqtt'], async (c) => {
+        const svc = c.zigbee2mqtt;
         if (!svc) {
-            throw new Error('Zigbee 服务未初始化');
+            throw new Error('Zigbee2MQTT 服务未初始化');
         }
         devices = await svc.listDevices();
     });
@@ -30,14 +30,14 @@ export async function callZigbeeListDevicesTool(ctx: Context, args: any): Promis
     const result = {
         count: devices.length,
         devices: devices.map((d: any) => ({
-            deviceId: d.ieee_address,
+            deviceId: d.friendly_name || d.ieee_address,
             friendlyName: d.friendly_name || d.ieee_address,
-            model: d.definition?.model || '未知型号',
-            vendor: d.definition?.vendor || '未知厂商',
+            model: d.definition?.model || d.model || '未知型号',
+            vendor: d.definition?.vendor || d.vendor || '未知厂商',
             type: d.type === 'Router' ? '路由器' : (d.type === 'EndDevice' ? '终端设备' : d.type || '未知'),
             powerSource: d.powerSource,
             lastSeen: d.lastSeen ? new Date(d.lastSeen).toISOString() : null,
-            supportsOnOff: d.supportsOnOff,
+            supportsOnOff: d.supportsOnOff !== false, // zigbee2mqtt 设备默认支持开关
         })),
     };
     
@@ -73,17 +73,18 @@ export async function callZigbeeGetDeviceStatusTool(ctx: Context, args: any): Pr
     let deviceInfo: any = null;
     let currentState: string | null = null;
     
-    await ctx.inject(['zigbee'], async (c) => {
-        const svc = c.zigbee;
+    await ctx.inject(['zigbee2mqtt'], async (c) => {
+        const svc = c.zigbee2mqtt;
         if (!svc) {
-            throw new Error('Zigbee 服务未初始化');
+            throw new Error('Zigbee2MQTT 服务未初始化');
         }
         
         // 获取设备列表以查找设备
         const devices = await svc.listDevices();
         const device = devices.find((d: any) => 
-            d.ieee_address === deviceId || 
-            d.friendly_name === deviceId ||
+            d.friendly_name === deviceId || 
+            d.ieee_address === deviceId ||
+            String(d.friendly_name).toLowerCase() === String(deviceId).toLowerCase() ||
             String(d.ieee_address).toLowerCase() === String(deviceId).toLowerCase()
         );
         
@@ -93,66 +94,27 @@ export async function callZigbeeGetDeviceStatusTool(ctx: Context, args: any): Pr
         
         deviceInfo = device;
         
-        // 尝试读取设备的当前状态（genOnOff cluster 的 onOff 属性）
-        try {
-            const herdsman = (svc as any).herdsman;
-            if (herdsman) {
-                const allDevices = herdsman.getDevices?.() || [];
-                const rawDevice = allDevices.find((d: any) => 
-                    d.ieeeAddr === device.ieee_address ||
-                    String(d.ieeeAddr).toLowerCase() === String(device.ieee_address).toLowerCase()
-                );
-                
-                if (rawDevice) {
-                    const endpoints = rawDevice.endpoints || [];
-                    const GEN_ONOFF_ID = 6;
-                    const hasOnOff = (ep: any): boolean => {
-                        try {
-                            if (ep?.supportsInputCluster && ep.supportsInputCluster('genOnOff')) return true;
-                            if (Array.isArray(ep?.inputClusters) && ep.inputClusters.includes(GEN_ONOFF_ID)) return true;
-                            return false;
-                        } catch {}
-                        return false;
-                    };
-                    
-                    for (const ep of endpoints) {
-                        if (hasOnOff(ep)) {
-                            try {
-                                // 读取 onOff 属性（0 = OFF, 1 = ON）
-                                const attrs = await ep.read('genOnOff', ['onOff']);
-                                if (attrs && typeof attrs.onOff === 'number') {
-                                    currentState = attrs.onOff === 1 ? 'ON' : 'OFF';
-                                    break;
-                                }
-                            } catch (e) {
-                                // 读取失败，可能设备离线或未响应
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) {
-            // 读取状态失败，但不影响返回基本信息
+        // zigbee2mqtt 通过 MQTT 获取设备状态
+        // 设备状态通常从 MQTT topic 中获取，这里我们尝试从设备信息中获取
+        // 如果设备有 state 字段，使用它；否则尝试从 last_seen 判断在线状态
+        if (device.state) {
+            currentState = device.state.state === 'ON' ? 'ON' : (device.state.state === 'OFF' ? 'OFF' : null);
         }
     });
     
-    // 判断设备是否在线：
-    // 1. 如果能成功读取到状态（currentState 不为"未知"），说明设备在线
-    // 2. 否则，基于 lastSeen 时间戳判断（10分钟内见过视为在线）
-    const isOnline = currentState !== null && currentState !== '未知' 
-        ? true 
-        : (deviceInfo.lastSeen ? (Date.now() - deviceInfo.lastSeen) < 600000 : false);
+    // 判断设备是否在线：基于 lastSeen 时间戳判断（10分钟内见过视为在线）
+    const isOnline = deviceInfo.lastSeen ? (Date.now() - new Date(deviceInfo.lastSeen).getTime()) < 600000 : false;
     
-    return {
-        deviceId: deviceInfo.ieee_address,
+    const result = {
+        deviceId: deviceInfo.friendly_name || deviceInfo.ieee_address,
         friendlyName: deviceInfo.friendly_name || deviceInfo.ieee_address,
-        model: deviceInfo.definition?.model || '未知型号',
-        vendor: deviceInfo.definition?.vendor || '未知厂商',
+        model: deviceInfo.definition?.model || deviceInfo.model || '未知型号',
+        vendor: deviceInfo.definition?.vendor || deviceInfo.vendor || '未知厂商',
         type: deviceInfo.type === 'Router' ? '路由器' : (deviceInfo.type === 'EndDevice' ? '终端设备' : deviceInfo.type || '未知'),
         powerSource: deviceInfo.powerSource,
         lastSeen: deviceInfo.lastSeen ? new Date(deviceInfo.lastSeen).toISOString() : null,
         currentState: currentState || '未知', // ON, OFF, 或 未知（如果无法读取）
-        supportsOnOff: deviceInfo.supportsOnOff,
+        supportsOnOff: deviceInfo.supportsOnOff !== false,
         online: isOnline,
     };
     
@@ -194,12 +156,21 @@ export async function callZigbeeControlTool(ctx: Context, args: any): Promise<an
         throw new Error('state 必须是 "ON"、"OFF" 或 "TOGGLE"');
     }
     
-    await ctx.inject(['zigbee'], async (c) => {
-        const svc = c.zigbee;
+    await ctx.inject(['zigbee2mqtt'], async (c) => {
+        const svc = c.zigbee2mqtt;
         if (!svc) {
-            throw new Error('Zigbee 服务未初始化');
+            throw new Error('Zigbee2MQTT 服务未初始化');
         }
-        await svc.setDeviceState(deviceId, { state });
+        // zigbee2mqtt 使用 friendly_name 或 ieee_address 作为设备ID
+        // 先尝试通过 friendly_name 查找设备
+        const devices = await svc.listDevices();
+        const device = devices.find((d: any) => 
+            d.friendly_name === deviceId || 
+            d.ieee_address === deviceId ||
+            String(d.friendly_name).toLowerCase() === String(deviceId).toLowerCase()
+        );
+        const targetDeviceId = device ? (device.friendly_name || device.ieee_address) : deviceId;
+        await svc.setDeviceState(targetDeviceId, { state });
     });
     
     const result = {

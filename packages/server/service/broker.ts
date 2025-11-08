@@ -7,6 +7,7 @@ export default class BrokerService extends Service<Context> {
     private readonly logger = new Logger('broker');
     private aedes?: any;
     private server?: import('net').Server;
+    private wsServer?: any;
 
     async [Service.init](): Promise<void> {
         const nodeMode = process.argv.includes('--node');
@@ -23,6 +24,33 @@ export default class BrokerService extends Service<Context> {
         this.aedes = aedes;
         this.server = net.createServer(aedes.handle);
         this.server.listen(port, '0.0.0.0', () => this.logger.success(`MQTT Broker started at 0.0.0.0:${port}`));
+        
+        // 启动 WebSocket 服务器
+        const wsPort = brokerConf.wsPort || 8083;
+        let ws: any;
+        try {
+            ws = require('ws');
+        } catch (e) {
+            this.logger.warn('缺少依赖 ws，WebSocket 服务器未启动。如需 WebSocket 支持，请安装：yarn add -W ws');
+            return;
+        }
+        
+        const http = require('http');
+        const httpServer = http.createServer();
+        this.wsServer = new ws.Server({ 
+            server: httpServer,
+            path: '/mqtt'
+        });
+        
+        httpServer.listen(wsPort, '0.0.0.0', () => {
+            this.logger.success(`MQTT WebSocket Broker started at ws://0.0.0.0:${wsPort}/mqtt`);
+        });
+        
+        this.wsServer.on('connection', (wsClient: any, req: any) => {
+            const stream = ws.createWebSocketStream(wsClient);
+            aedes.handle(stream);
+            this.logger.info(`WebSocket client connected from ${req.socket.remoteAddress}`);
+        });
         aedes.on('client', (c: any) => {
             // 尝试从多个地方获取 keepalive 值
             // 注意：在 aedes 中，keepalive 可能在连接包中，需要从连接时的数据获取
@@ -175,8 +203,10 @@ export default class BrokerService extends Service<Context> {
 
     async [Service.dispose](): Promise<void> {
         try { await new Promise((r) => this.server?.close(() => r(null))); } catch {}
+        try { await new Promise((r) => this.wsServer?.close(() => r(null))); } catch {}
         try { this.aedes?.close?.(); } catch {}
         this.server = undefined;
+        this.wsServer = undefined;
         this.aedes = undefined;
     }
 }

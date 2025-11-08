@@ -265,7 +265,8 @@ const nodeSchema = Schema.object({
     broker: Schema.object({
         enabled: Schema.boolean().default(true),
         port: Schema.number().default(1883),
-    }).default({ enabled: true, port: 1883 }),
+        wsPort: Schema.number().default(8083),
+    }).default({ enabled: true, port: 1883, wsPort: 8083 }),
     zigbee2mqtt: Schema.object({
         enabled: Schema.boolean().default(true),
         mqttUrl: Schema.string().default('mqtt://localhost:1883'),

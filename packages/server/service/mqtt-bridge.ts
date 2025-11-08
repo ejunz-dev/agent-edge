@@ -2,6 +2,8 @@
 import { Context, Service } from 'cordis';
 import { Logger } from '../utils';
 import { config } from '../config';
+import * as path from 'node:path';
+import { fs, yaml } from '../utils';
 
 /**
  * MQTT Broker 桥接服务
@@ -74,7 +76,7 @@ export default class MqttBridgeService extends Service<Context> {
     }
 
     private async connectToBroker(brokerConfig: any): Promise<void> {
-        const { name, mqttUrl, baseTopic = 'zigbee2mqtt', username, password, enabled = true } = brokerConfig;
+        const { name, mqttUrl, baseTopic = 'zigbee2mqtt', username, password, enabled = true, reconnect: brokerReconnect } = brokerConfig;
 
         if (!enabled) {
             this.logger.info(`Broker ${name} 已禁用，跳过连接`);
@@ -97,7 +99,14 @@ export default class MqttBridgeService extends Service<Context> {
                 return;
             }
 
-            this.logger.info(`连接到 Broker: ${brokerName} (${mqttUrl})`);
+            // 获取重连配置：优先使用broker级别的配置，否则使用全局配置
+            const bridgeConf = (config as any).mqttBridge || {};
+            const globalReconnect = bridgeConf.reconnect || { enabled: true, period: 5000 };
+            const reconnectConfig = brokerReconnect || globalReconnect;
+            const reconnectEnabled = reconnectConfig.enabled !== false;
+            const reconnectPeriod = reconnectConfig.period || 5000;
+
+            this.logger.info(`连接到 Broker: ${brokerName} (${mqttUrl}), 重连: ${reconnectEnabled ? `启用(${reconnectPeriod}ms)` : '禁用'}`);
 
             const connectOptions: any = {
                 clientId: `bridge_${brokerName}_${Date.now()}`,
@@ -105,7 +114,7 @@ export default class MqttBridgeService extends Service<Context> {
                 password: password || undefined,
                 keepalive: 60,
                 connectTimeout: 30000,
-                reconnectPeriod: 5000,
+                reconnectPeriod: reconnectEnabled ? reconnectPeriod : 0, // 0表示禁用自动重连
                 clean: true,
             };
 
@@ -196,7 +205,10 @@ export default class MqttBridgeService extends Service<Context> {
             });
 
             client.on('reconnect', () => {
-                this.logger.info(`正在重连 Broker [${brokerName}]...`);
+                // 只有在启用重连时才记录日志
+                if (reconnectEnabled) {
+                    this.logger.info(`正在重连 Broker [${brokerName}]...`);
+                }
             });
 
             client.on('offline', () => {
@@ -285,6 +297,63 @@ export default class MqttBridgeService extends Service<Context> {
                 }
             }
         }
+    }
+
+    /**
+     * 重新加载配置并重新连接所有broker
+     */
+    async reloadConfig(): Promise<void> {
+        this.logger.info('正在重新加载配置...');
+        
+        // 断开所有现有连接
+        await this[Service.dispose]();
+        
+        // 重新读取配置文件并应用schema验证
+        const isNode = process.argv.includes('--node');
+        const configPath = path.resolve(process.cwd(), `config.${isNode ? 'node' : 'server'}.yaml`);
+        if (fs.existsSync(configPath)) {
+            const configData = yaml.load(fs.readFileSync(configPath, 'utf8'));
+            // 应用schema验证并更新config对象
+            // 注意：这里直接更新mqttBridge部分，因为config对象是共享的
+            if (configData.mqttBridge) {
+                // 合并现有配置，保留schema默认值
+                const currentBridge = (config as any).mqttBridge || {};
+                (config as any).mqttBridge = {
+                    enabled: configData.mqttBridge.enabled ?? currentBridge.enabled ?? true,
+                    reconnect: {
+                        enabled: configData.mqttBridge.reconnect?.enabled ?? currentBridge.reconnect?.enabled ?? true,
+                        period: configData.mqttBridge.reconnect?.period ?? currentBridge.reconnect?.period ?? 5000,
+                    },
+                    brokers: configData.mqttBridge.brokers || [],
+                };
+            }
+        }
+        
+        // 重新初始化
+        await this[Service.init]();
+        
+        this.logger.success('配置重新加载完成');
+    }
+
+    /**
+     * 获取当前配置状态
+     */
+    getConfigStatus(): any {
+        const bridgeConf = (config as any).mqttBridge || {};
+        const brokers = bridgeConf.brokers || [];
+        const status: any = {
+            enabled: bridgeConf.enabled ?? true,
+            reconnect: bridgeConf.reconnect || { enabled: true, period: 5000 },
+            brokers: brokers.map((broker: any) => ({
+                name: broker.name,
+                mqttUrl: broker.mqttUrl,
+                baseTopic: broker.baseTopic || 'zigbee2mqtt',
+                enabled: broker.enabled !== false,
+                reconnect: broker.reconnect || bridgeConf.reconnect || { enabled: true, period: 5000 },
+                connected: this.clients.has(broker.name) && this.clients.get(broker.name)?.connected,
+            })),
+        };
+        return status;
     }
 
     async [Service.dispose](): Promise<void> {

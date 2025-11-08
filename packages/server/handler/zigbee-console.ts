@@ -149,6 +149,7 @@ export function broadcastZigbeeUpdate(ctx: Context, type: string, data: any) {
 
 // 前端页面 Handler
 class ZigbeeConsolePage extends Handler<Context> {
+    noCheckPermView = true;
     async get() {
         const htmlPath = path.join(__dirname, '../node/zigbee-console.html');
         if (fs.existsSync(htmlPath)) {
@@ -170,6 +171,6 @@ class ZigbeeConsolePage extends Handler<Context> {
 }
 
 export async function apply(ctx: Context) {
-    ctx.Route('zigbee-console', '/', ZigbeeConsolePage);
+    ctx.Route('zigbee-console', '/zigbee-console', ZigbeeConsolePage);
     ctx.Connection('zigbee-console-ws', '/zigbee-ws', ZigbeeConsoleConnectionHandler);
 }

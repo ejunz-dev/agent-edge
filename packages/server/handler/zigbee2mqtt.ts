@@ -4,6 +4,7 @@ import { Handler } from '@ejunz/framework';
 import Zigbee2MqttService from '../service/zigbee2mqtt';
 
 class Z2MStatusHandler extends Handler<Context> {
+    noCheckPermView = true;
     async get() {
         await this.ctx.inject(['zigbee2mqtt'], (c) => {
             const svc = c.zigbee2mqtt as Zigbee2MqttService;
@@ -18,6 +19,7 @@ class Z2MStatusHandler extends Handler<Context> {
 }
 
 class Z2MDevicesHandler extends Handler<Context> {
+    noCheckPermView = true;
     async get() {
         await this.ctx.inject(['zigbee2mqtt'], async (c) => {
             const svc = c.zigbee2mqtt as Zigbee2MqttService;
@@ -29,6 +31,9 @@ class Z2MDevicesHandler extends Handler<Context> {
 }
 
 class Z2MControlHandler extends Handler<Context> {
+    noCheckPermView = true;
+    notUsage = true;
+    allowCors = true;
     async post(deviceId: string) {
         await this.ctx.inject(['zigbee2mqtt'], async (c) => {
             const svc = c.zigbee2mqtt as Zigbee2MqttService;
@@ -49,6 +54,8 @@ class Z2MControlHandler extends Handler<Context> {
 }
 
 class Z2MPermitJoinHandler extends Handler<Context> {
+    noCheckPermView = true;
+    allowCors = true;
     async post() {
         await this.ctx.inject(['zigbee2mqtt'], async (c) => {
             const svc = c.zigbee2mqtt as Zigbee2MqttService;
@@ -68,6 +75,7 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-control', '/zigbee2mqtt/device/:deviceId', Z2MControlHandler);
     ctx.Route('z2m-permit', '/zigbee2mqtt/permit_join', Z2MPermitJoinHandler);
     class Z2MCoordinatorHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get() {
             // zigbee2mqtt 服务不提供 coordinator 信息，返回空
             this.response.body = { coordinator: null };
@@ -76,6 +84,7 @@ export async function apply(ctx: Context) {
     }
     ctx.Route('z2m-coordinator', '/zigbee2mqtt/coordinator', Z2MCoordinatorHandler);
     class Z2MPermitStatusHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get() {
             // zigbee2mqtt 服务不提供 permit status，返回默认值
             this.response.body = { enabled: false, remaining: 0 };
@@ -85,6 +94,7 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-permit-status', '/zigbee2mqtt/permit_status', Z2MPermitStatusHandler);
 
     class Z2MDeviceDebugHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get(deviceId: string) {
             await this.ctx.inject(['zigbee2mqtt'], async (c) => {
                 const svc = c.zigbee2mqtt as Zigbee2MqttService;
@@ -107,6 +117,7 @@ export async function apply(ctx: Context) {
     }
     ctx.Route('z2m-device-debug', '/zigbee2mqtt/device/:deviceId/debug', Z2MDeviceDebugHandler);
     class Z2MDeviceLqiHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get(deviceId: string) {
             // zigbee2mqtt 服务不提供 LQI 信息
             this.response.body = { error: 'not_supported' };
@@ -115,6 +126,7 @@ export async function apply(ctx: Context) {
     }
     ctx.Route('z2m-device-lqi', '/zigbee2mqtt/device/:deviceId/lqi', Z2MDeviceLqiHandler);
     class Z2MDeviceBasicHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get(deviceId: string) {
             // zigbee2mqtt 服务不提供 basic 信息
             this.response.body = { error: 'not_supported' };
@@ -125,6 +137,7 @@ export async function apply(ctx: Context) {
     
     // 工具执行 Handler：用于 Server 端调用 Node 工具
     class Z2MToolExecuteHandler extends Handler<Context> {
+        noCheckPermView = true;
         async post() {
             const body = this.request.body || {};
             const { toolName, arguments: args } = body;
@@ -151,6 +164,7 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-tool-execute', '/zigbee2mqtt/tool/execute', Z2MToolExecuteHandler);
     
     class Z2MListAdaptersHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get() {
             // zigbee2mqtt 服务不提供适配器列表
             this.response.body = { candidates: [] };
@@ -160,6 +174,7 @@ export async function apply(ctx: Context) {
     ctx.Route('z2m-adapters', '/zigbee2mqtt/adapters', Z2MListAdaptersHandler);
     
     class Z2MAllDevicesRawHandler extends Handler<Context> {
+        noCheckPermView = true;
         async get() {
             await this.ctx.inject(['zigbee2mqtt'], async (c) => {
                 const svc = c.zigbee2mqtt as Zigbee2MqttService;

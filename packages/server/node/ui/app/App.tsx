@@ -4,11 +4,9 @@ import {
   HashRouter, Outlet, Route, Routes,
 } from 'react-router-dom';
 import { Header } from './components/Header';
+import Console from './pages/Console';
 import Dashboard from './pages/Dashboard';
-import Logs from './pages/Logs';
-import MCP from './pages/MCP';
-import NodeDashboard from './pages/NodeDashboard';
-import Resolver from './Resolver';
+import Settings from './pages/Settings';
 
 function DefaultLayout() {
   return (
@@ -23,7 +21,6 @@ function DefaultLayout() {
         <Container size="xl">
           <Outlet />
         </Container>
-        <Logs />
       </AppShell.Main>
     </AppShell>
   );
@@ -35,11 +32,12 @@ export default function App() {
       <Routes>
         <Route path="/" element={<DefaultLayout />}>
           <Route index element={<Dashboard />} />
-          <Route path="/mcp" element={<MCP />} />
-          <Route path="/node" element={<NodeDashboard />} />
+          <Route path="dashboard" element={<Dashboard />} />
+          <Route path="console" element={<Console />} />
+          <Route path="settings" element={<Settings />} />
         </Route>
-        <Route path="/resolver" element={<Resolver />} />
       </Routes>
     </HashRouter>
   );
 }
+

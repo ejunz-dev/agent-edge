@@ -4,7 +4,7 @@ import {
   Tabs, Text, Title,
 } from '@mantine/core';
 import {
-  IconApi, IconHome, IconServer,
+  IconDashboard, IconSettings, IconTerminal,
 } from '@tabler/icons-react';
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -12,9 +12,9 @@ import { useLocation, useNavigate } from 'react-router-dom';
 const iconStyle = { width: rem(18), height: rem(18) };
 
 const mainLinks = [
-  { link: '/', label: 'Dashboard', icon: <IconHome style={iconStyle} /> },
-  { link: '/mcp', label: 'MCP Logs', icon: <IconApi style={iconStyle} /> },
-  { link: '/node', label: 'Node Console', icon: <IconServer style={iconStyle} /> },
+  { link: '/', label: 'Dashboard', icon: <IconDashboard style={iconStyle} /> },
+  { link: '/console', label: 'Zigbee 控制台', icon: <IconTerminal style={iconStyle} /> },
+  { link: '/settings', label: 'MQTT Bridge 配置', icon: <IconSettings style={iconStyle} /> },
 ];
 
 export function Header() {
@@ -32,11 +32,7 @@ export function Header() {
       <Container size="xl">
         <Group justify="space-between" h="100%" px="md">
           <Title order={3}>
-            Ejunz/agent-edge
-            { /* @ts-ignore */ }
-            <Text hiddenFrom="xl">{window.Context.contest.id}</Text>
-            { /* @ts-ignore */ }
-            <Text visibleFrom="xl">{window.Context.contest.name}</Text>
+            Node Dashboard
           </Title>
 
           <Group h="100%" gap={0} visibleFrom="sm">
@@ -56,3 +52,4 @@ export function Header() {
     </header>
   );
 }
+

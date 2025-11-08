@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MQTT Bridge 配置</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    .container { max-width: 1400px; margin: 0 auto; background: white; border-radius: 8px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    h1 { margin-bottom: 24px; color: #333; }
+    h2 { margin-top: 32px; margin-bottom: 16px; color: #555; font-size: 18px; border-bottom: 2px solid #007bff; padding-bottom: 8px; }
+    .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .status-card { background: #f8f9fa; padding: 16px; border-radius: 6px; border-left: 4px solid #007bff; }
+    .status-card h3 { font-size: 14px; color: #666; margin-bottom: 8px; }
+    .status-card .value { font-size: 18px; font-weight: 600; color: #333; }
+    .status-card .value.ok { color: #28a745; }
+    .status-card .value.bad { color: #dc3545; }
+    .button-group { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+    button { padding: 10px 20px; border: none; border-radius: 4px; background: #007bff; color: white; cursor: pointer; font-size: 14px; transition: background 0.2s; }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    button.success { background: #28a745; }
+    button.success:hover { background: #218838; }
+    button.warning { background: #ffc107; color: #333; }
+    button.warning:hover { background: #e0a800; }
+    button.danger { background: #dc3545; }
+    button.danger:hover { background: #c82333; }
+    .config-section { margin-bottom: 32px; }
+    .config-tabs { display: flex; gap: 8px; margin-bottom: 16px; border-bottom: 2px solid #e0e0e0; }
+    .config-tab { padding: 12px 24px; background: none; border: none; cursor: pointer; font-size: 14px; color: #666; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+    .config-tab.active { color: #007bff; border-bottom-color: #007bff; font-weight: 600; }
+    .config-content { display: none; }
+    .config-content.active { display: block; }
+    .config-view { background: #f8f9fa; padding: 16px; border-radius: 6px; font-family: 'Courier New', monospace; font-size: 13px; white-space: pre-wrap; word-wrap: break-word; max-height: 500px; overflow-y: auto; }
+    .config-edit { width: 100%; min-height: 400px; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 13px; }
+    .broker-list { margin-top: 16px; }
+    .broker-item { background: #f8f9fa; padding: 16px; border-radius: 6px; margin-bottom: 12px; border-left: 4px solid #007bff; }
+    .broker-item.disabled { opacity: 0.6; border-left-color: #ccc; }
+    .broker-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .broker-name { font-size: 16px; font-weight: 600; color: #333; }
+    .broker-status { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+    .broker-status.connected { background: #d4edda; color: #155724; }
+    .broker-status.disconnected { background: #f8d7da; color: #721c24; }
+    .broker-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; font-size: 13px; color: #666; }
+    .broker-detail-item { }
+    .broker-detail-label { font-weight: 600; color: #333; }
+    .error-message { background: #f8d7da; color: #721c24; padding: 12px; border-radius: 4px; margin-bottom: 16px; display: none; }
+    .error-message.show { display: block; }
+    .success-message { background: #d4edda; color: #155724; padding: 12px; border-radius: 4px; margin-bottom: 16px; display: none; }
+    .success-message.show { display: block; }
+    .loading { display: inline-block; width: 16px; height: 16px; border: 2px solid #f3f3f3; border-top: 2px solid #007bff; border-radius: 50%; animation: spin 1s linear infinite; margin-left: 8px; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>MQTT Bridge 配置</h1>
+    
+    <div class="error-message" id="errorMsg"></div>
+    <div class="success-message" id="successMsg"></div>
+    
+    <!-- 状态概览 -->
+    <div class="status-grid" id="statusGrid">
+      <div class="status-card">
+        <h3>服务状态</h3>
+        <div class="value" id="serviceStatus">-</div>
+      </div>
+      <div class="status-card">
+        <h3>已连接 Broker</h3>
+        <div class="value" id="connectedCount">-</div>
+      </div>
+      <div class="status-card">
+        <h3>总 Broker 数</h3>
+        <div class="value" id="totalCount">-</div>
+      </div>
+    </div>
+    
+    <!-- 操作按钮 -->
+    <div class="button-group">
+      <button class="success" onclick="window.reloadConfig()">重新加载配置</button>
+      <button class="warning" onclick="window.refreshStatus()">刷新状态</button>
+      <button onclick="window.switchTab('declared')">查看声明的配置</button>
+      <button onclick="window.switchTab('stored')">查看存储的配置</button>
+      <button onclick="window.switchTab('edit')">编辑配置</button>
+    </div>
+    
+    <!-- 配置标签页 -->
+    <div class="config-section">
+      <div class="config-tabs">
+        <button class="config-tab active" data-tab="declared" onclick="window.switchTab('declared')">声明的配置 (Schema)</button>
+        <button class="config-tab" data-tab="stored" onclick="window.switchTab('stored')">存储的配置</button>
+        <button class="config-tab" data-tab="edit" onclick="window.switchTab('edit')">编辑配置</button>
+        <button class="config-tab" data-tab="brokers" onclick="window.switchTab('brokers')">Broker 列表</button>
+      </div>
+      
+      <!-- 声明的配置 -->
+      <div class="config-content active" id="declaredContent">
+        <h2>声明的配置 (Schema)</h2>
+        <div class="config-view" id="declaredConfig">加载中...</div>
+      </div>
+      
+      <!-- 存储的配置 -->
+      <div class="config-content" id="storedContent">
+        <h2>存储的配置</h2>
+        <div class="config-view" id="storedConfig">加载中...</div>
+      </div>
+      
+      <!-- 编辑配置 -->
+      <div class="config-content" id="editContent">
+        <h2>编辑配置</h2>
+        <p style="margin-bottom: 12px; color: #666;">修改配置后，点击"保存配置"按钮保存，然后点击"重新加载配置"应用更改。</p>
+        <textarea class="config-edit" id="editConfig"></textarea>
+        <div style="margin-top: 12px;">
+          <button class="success" onclick="window.saveConfig()">保存配置</button>
+          <button onclick="window.loadStoredConfig()">重置为存储的配置</button>
+        </div>
+      </div>
+      
+      <!-- Broker 列表 -->
+      <div class="config-content" id="brokersContent">
+        <h2>Broker 连接状态</h2>
+        <div class="broker-list" id="brokerList">加载中...</div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    (function() {
+      let storedConfig = null;
+      let declaredSchema = null;
+      
+      function showError(msg) {
+        const el = document.getElementById('errorMsg');
+        el.textContent = msg;
+        el.classList.add('show');
+        setTimeout(() => el.classList.remove('show'), 5000);
+      }
+      
+      function showSuccess(msg) {
+        const el = document.getElementById('successMsg');
+        el.textContent = msg;
+        el.classList.add('show');
+        setTimeout(() => el.classList.remove('show'), 3000);
+      }
+      
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+      
+      function formatJSON(obj) {
+        return JSON.stringify(obj, null, 2);
+      }
+      
+      window.switchTab = function(tabName) {
+        // 更新标签
+        document.querySelectorAll('.config-tab').forEach(tab => {
+          tab.classList.remove('active');
+          if (tab.dataset.tab === tabName) {
+            tab.classList.add('active');
+          }
+        });
+        
+        // 更新内容
+        document.querySelectorAll('.config-content').forEach(content => {
+          content.classList.remove('active');
+          if (content.id === tabName + 'Content') {
+            content.classList.add('active');
+          }
+        });
+        
+        // 加载对应内容
+        if (tabName === 'declared' && !declaredSchema) {
+          loadDeclaredConfig();
+        } else if (tabName === 'stored') {
+          loadStoredConfig();
+        } else if (tabName === 'edit' && !storedConfig) {
+          loadStoredConfig();
+        } else if (tabName === 'brokers') {
+          refreshStatus();
+        }
+      };
+      
+      async function loadDeclaredConfig() {
+        try {
+          const response = await fetch('/api/mqtt-bridge-config/schema');
+          if (!response.ok) throw new Error('获取Schema失败');
+          const data = await response.json();
+          declaredSchema = data.schema;
+          document.getElementById('declaredConfig').textContent = formatJSON(declaredSchema);
+        } catch (e) {
+          showError('加载声明的配置失败: ' + e.message);
+          document.getElementById('declaredConfig').textContent = '加载失败: ' + e.message;
+        }
+      }
+      
+      async function loadStoredConfig() {
+        try {
+          const response = await fetch('/api/mqtt-bridge-config');
+          if (!response.ok) throw new Error('获取配置失败');
+          const data = await response.json();
+          storedConfig = data.config;
+          document.getElementById('storedConfig').textContent = formatJSON(storedConfig);
+          document.getElementById('editConfig').value = formatJSON(storedConfig);
+        } catch (e) {
+          showError('加载存储的配置失败: ' + e.message);
+          document.getElementById('storedConfig').textContent = '加载失败: ' + e.message;
+        }
+      }
+      
+      window.saveConfig = async function() {
+        try {
+          const configText = document.getElementById('editConfig').value;
+          const config = JSON.parse(configText);
+          
+          const response = await fetch('/api/mqtt-bridge-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(config),
+          });
+          
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || '保存失败');
+          }
+          
+          const data = await response.json();
+          storedConfig = data.config;
+          showSuccess('配置已保存');
+          document.getElementById('storedConfig').textContent = formatJSON(storedConfig);
+        } catch (e) {
+          showError('保存配置失败: ' + e.message);
+        }
+      };
+      
+      window.reloadConfig = async function() {
+        const btn = event.target;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '重新加载中...';
+        
+        try {
+          const response = await fetch('/api/mqtt-bridge-config/reload', {
+            method: 'POST',
+          });
+          
+          if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || '重新加载失败');
+          }
+          
+          const data = await response.json();
+          showSuccess(data.message || '配置已重新加载');
+          setTimeout(() => refreshStatus(), 1000);
+        } catch (e) {
+          showError('重新加载配置失败: ' + e.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      };
+      
+      window.refreshStatus = async function() {
+        try {
+          const response = await fetch('/api/mqtt-bridge-config/status');
+          if (!response.ok) throw new Error('获取状态失败');
+          const data = await response.json();
+          
+          if (!data.success) {
+            throw new Error(data.error || '获取状态失败');
+          }
+          
+          const status = data.status;
+          
+          // 更新状态卡片
+          document.getElementById('serviceStatus').textContent = status.enabled ? '已启用' : '已禁用';
+          document.getElementById('serviceStatus').className = status.enabled ? 'value ok' : 'value bad';
+          
+          const connectedCount = status.brokers.filter(b => b.connected).length;
+          const totalCount = status.brokers.length;
+          document.getElementById('connectedCount').textContent = `${connectedCount}/${totalCount}`;
+          document.getElementById('totalCount').textContent = totalCount;
+          
+          // 更新Broker列表
+          const brokerList = document.getElementById('brokerList');
+          if (status.brokers.length === 0) {
+            brokerList.innerHTML = '<p style="text-align: center; color: #999;">暂无配置的Broker</p>';
+          } else {
+            brokerList.innerHTML = status.brokers.map(broker => {
+              const statusClass = broker.connected ? 'connected' : 'disconnected';
+              const statusText = broker.connected ? '已连接' : '未连接';
+              const disabledClass = !broker.enabled ? 'disabled' : '';
+              return `
+                <div class="broker-item ${disabledClass}">
+                  <div class="broker-header">
+                    <span class="broker-name">${escapeHtml(broker.name)}</span>
+                    <span class="broker-status ${statusClass}">${statusText}</span>
+                  </div>
+                  <div class="broker-details">
+                    <div class="broker-detail-item">
+                      <span class="broker-detail-label">地址:</span> ${escapeHtml(broker.mqttUrl)}
+                    </div>
+                    <div class="broker-detail-item">
+                      <span class="broker-detail-label">主题:</span> ${escapeHtml(broker.baseTopic)}
+                    </div>
+                    <div class="broker-detail-item">
+                      <span class="broker-detail-label">启用:</span> ${broker.enabled ? '是' : '否'}
+                    </div>
+                    <div class="broker-detail-item">
+                      <span class="broker-detail-label">重连:</span> ${broker.reconnect.enabled ? `启用(${broker.reconnect.period}ms)` : '禁用'}
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join('');
+          }
+        } catch (e) {
+          showError('刷新状态失败: ' + e.message);
+        }
+      };
+      
+      // 初始化
+      loadDeclaredConfig();
+      loadStoredConfig();
+      refreshStatus();
+      
+      // 定期刷新状态
+      setInterval(refreshStatus, 5000);
+    })();
+  </script>
+</body>
+</html>
+

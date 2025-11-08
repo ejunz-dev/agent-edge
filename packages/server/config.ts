@@ -270,6 +270,13 @@ const nodeSchema = Schema.object({
     // MQTT 桥接配置（支持连接多个 broker）
     mqttBridge: Schema.object({
         enabled: Schema.boolean().default(true),
+        reconnect: Schema.object({
+            enabled: Schema.boolean().default(true), // 是否启用自动重连
+            period: Schema.number().default(5000), // 重连间隔（毫秒）
+        }).default({
+            enabled: true,
+            period: 5000,
+        }),
         brokers: Schema.array(Schema.object({
             name: Schema.string().required(),
             mqttUrl: Schema.string().required(),
@@ -277,9 +284,20 @@ const nodeSchema = Schema.object({
             username: Schema.string().default(''),
             password: Schema.string().default(''),
             enabled: Schema.boolean().default(true),
+            reconnect: Schema.object({
+                enabled: Schema.boolean().default(true), // 单个broker是否启用自动重连（继承全局配置）
+                period: Schema.number().default(5000), // 单个broker重连间隔（继承全局配置）
+            }).default({
+                enabled: true,
+                period: 5000,
+            }),
         })).default([]),
     }).default({
         enabled: true,
+        reconnect: {
+            enabled: true,
+            period: 5000,
+        },
         brokers: [],
     }),
     zigbee2mqtt: Schema.object({

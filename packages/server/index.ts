@@ -69,9 +69,8 @@ function applyNode(ctx: Context) {
         c.plugin(require('./handler/zigbee-console'));
         c.server.listen();
     });
-    // node client（可选，如果配置了 upstream 才会连接）
-    // 如果只想本地工作，不配置 upstream 字段或设置为空字符串即可
-    // 即使没有上游服务器，也会连接配置的MQTT broker
+    // node client（仅用于本地 MQTT Broker 连接）
+    // 上游 WebSocket 连接已移除，远程 MQTT 连接通过 mqttBridge 配置管理
     ctx.plugin(require('./client/node'));
 }
 

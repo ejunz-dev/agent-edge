@@ -25,56 +25,356 @@ export function setGlobalWsConnection(ws: any): void {
     globalWsConnection = ws;
 }
 
-function normalizeUpstreamFromHost(host: string): string {
-    if (!host) return '';
+// 已订阅的事件集合
+const subscribedEvents = new Set<string>();
+
+/**
+ * 构建 WebSocket 连接 URL
+ * 支持新协议格式：ws://your-domain/d/{domainId}/client/ws?token={wsToken}
+ * 也支持旧格式：ws://your-domain/edge/conn（向后兼容）
+ */
+function buildWebSocketUrl(): string | null {
+    const clientConfig = config as any;
+    const server = clientConfig.server || '';
+    const domainId = clientConfig.domainId || '';
+    const wsToken = clientConfig.wsToken || '';
     
-    // 如果已经是完整的 WebSocket URL（包含路径），直接返回
-    if (/^wss?:\/\//i.test(host)) {
+    // 如果配置了 domainId 和 wsToken，使用新协议格式
+    if (domainId && wsToken) {
+        let baseUrl = server;
+        
+        // 如果 server 是 HTTP/HTTPS URL，转换为 WebSocket URL
+        if (/^https?:\/\//i.test(server)) {
+            baseUrl = server.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+        } else if (!/^wss?:\/\//i.test(server)) {
+            // 如果不是完整 URL，添加协议
+            baseUrl = `wss://${server}`;
+        }
+        
         try {
-            const url = new URL(host);
-            // 如果 URL 已经包含路径（不只是根路径），直接返回
-            if (url.pathname && url.pathname !== '/') {
-                return host;
-            }
-            // 如果只有根路径，添加 /edge/conn
-            return new URL('/edge/conn', host).toString();
-        } catch {
-            // URL 解析失败，尝试直接使用
-            return host;
+            const url = new URL(baseUrl);
+            // 构建新协议路径：/d/{domainId}/client/ws?token={wsToken}
+            url.pathname = `/d/${domainId}/client/ws`;
+            url.search = `?token=${encodeURIComponent(wsToken)}`;
+            return url.toString();
+        } catch (e) {
+            logger.error('构建 WebSocket URL 失败: %s', (e as Error).message);
+            return null;
         }
     }
     
-    // 支持用户把 host 写成完整 HTTP/HTTPS URL
-    if (/^https?:\/\//i.test(host)) {
-        const base = host.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
-        try {
-            const url = new URL(base);
-            // 如果 URL 已经包含路径（不只是根路径），直接返回转换后的 WebSocket URL
-            if (url.pathname && url.pathname !== '/') {
-                return base;
+    // 向后兼容：使用旧格式
+    if (server) {
+        // 如果已经是完整的 WebSocket URL（包含路径），直接返回
+        if (/^wss?:\/\//i.test(server)) {
+            try {
+                const url = new URL(server);
+                // 如果 URL 已经包含路径（不只是根路径），直接返回
+                if (url.pathname && url.pathname !== '/') {
+                    return server;
+                }
+                // 如果只有根路径，添加 /edge/conn
+                return new URL('/edge/conn', server).toString();
+            } catch {
+                // URL 解析失败，尝试直接使用
+                return server;
             }
-            // 如果只有根路径，添加 /edge/conn
-            return new URL('/edge/conn', base).toString();
-        } catch {
-            // URL 解析失败，尝试添加 /edge/conn
-        return new URL(base.endsWith('/') ? 'edge/conn' : '/edge/conn', base).toString();
-    }
+        }
+        
+        // 支持用户把 host 写成完整 HTTP/HTTPS URL
+        if (/^https?:\/\//i.test(server)) {
+            const base = server.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+            try {
+                const url = new URL(base);
+                // 如果 URL 已经包含路径（不只是根路径），直接返回转换后的 WebSocket URL
+                if (url.pathname && url.pathname !== '/') {
+                    return base;
+                }
+                // 如果只有根路径，添加 /edge/conn
+                return new URL('/edge/conn', base).toString();
+            } catch {
+                // URL 解析失败，尝试添加 /edge/conn
+                return new URL(base.endsWith('/') ? 'edge/conn' : '/edge/conn', base).toString();
+            }
+        }
+        
+        // 默认使用 wss，添加 /edge/conn
+        return `wss://${server}/edge/conn`;
     }
     
-    // 默认使用 wss，添加 /edge/conn
-    return `wss://${host}/edge/conn`;
+    // 支持环境变量
+    const envUpstream = process.env.EDGE_UPSTREAM || '';
+    if (envUpstream) {
+        return envUpstream;
+    }
+    
+    return null;
 }
 
-function resolveUpstream(): string | null {
-    const fromServer = normalizeUpstreamFromHost((config as any).server || '');
-    const target = fromServer || process.env.EDGE_UPSTREAM || '';
-    return target || null;
+/**
+ * 发送 Cordis 事件系统消息
+ */
+function sendEvent(ws: any, key: 'publish' | 'subscribe' | 'unsubscribe' | 'ping', event: string, payload: any[] = []) {
+    if (!ws || ws.readyState !== 1) { // WebSocket.OPEN = 1
+        logger.warn('WebSocket 未连接，无法发送事件: %s', event);
+        return;
+    }
+    
+    const message = {
+        key,
+        event,
+        payload,
+    };
+    
+    try {
+        ws.send(JSON.stringify(message));
+        logger.debug?.('发送事件: %s %s', key, event);
+    } catch (e) {
+        logger.error('发送事件失败: %s', (e as Error).message);
+    }
+}
+
+/**
+ * 发送旧格式消息（向后兼容）
+ */
+function sendLegacyMessage(ws: any, type: string, data: any = {}) {
+    if (!ws || ws.readyState !== 1) {
+        logger.warn('WebSocket 未连接，无法发送消息: %s', type);
+        return;
+    }
+    
+    const message = {
+        type,
+        ...data,
+    };
+    
+    try {
+        ws.send(JSON.stringify(message));
+        logger.debug?.('发送旧格式消息: %s', type);
+    } catch (e) {
+        logger.error('发送消息失败: %s', (e as Error).message);
+    }
+}
+
+/**
+ * 处理事件格式消息（新协议）
+ */
+function handleEventMessage(ws: any, msg: any) {
+    const { event, payload } = msg;
+    
+    switch (event) {
+        case 'asr/result': {
+            const [result] = payload || [];
+            if (result) {
+                logger.info('📝 ASR 结果: %s (isFinal: %s)', result.text, result.isFinal);
+                // 转发给语音客户端处理
+                if (globalVoiceClient) {
+                    (globalVoiceClient as any).handleMessage?.(JSON.stringify({
+                        type: 'asr/result',
+                        text: result.text,
+                        isFinal: result.isFinal,
+                    }));
+                }
+            }
+            break;
+        }
+        
+        case 'asr/sentence_begin': {
+            logger.debug('ASR 句子开始');
+            break;
+        }
+        
+        case 'asr/sentence_end': {
+            logger.debug('ASR 句子结束');
+            break;
+        }
+        
+        case 'asr/error': {
+            const [error] = payload || [];
+            logger.error('ASR 错误: %s', error?.message || error);
+            if (globalVoiceClient) {
+                globalVoiceClient.emit('error', new Error(error?.message || error || 'ASR 错误'));
+            }
+            break;
+        }
+        
+        case 'tts/audio': {
+            const [audioData] = payload || [];
+            if (audioData?.audio) {
+                logger.debug('收到 TTS 音频数据');
+                // 转发给语音客户端处理
+                if (globalVoiceClient) {
+                    (globalVoiceClient as any).handleMessage?.(JSON.stringify({
+                        type: 'tts/audio',
+                        audio: audioData.audio,
+                    }));
+                }
+            }
+            break;
+        }
+        
+        case 'tts/error': {
+            const [error] = payload || [];
+            logger.error('TTS 错误: %s', error?.message || error);
+            if (globalVoiceClient) {
+                globalVoiceClient.emit('error', new Error(error?.message || error || 'TTS 错误'));
+            }
+            break;
+        }
+        
+        case 'agent/content': {
+            const [content] = payload || [];
+            if (content) {
+                logger.debug('Agent 内容: %s', content);
+                // 可以在这里处理流式内容
+            }
+            break;
+        }
+        
+        case 'agent/tool_call': {
+            logger.debug('Agent 工具调用: %s', JSON.stringify(msg.tools || payload));
+            break;
+        }
+        
+        case 'agent/tool_result': {
+            logger.debug('Agent 工具结果: %s', JSON.stringify(msg));
+            break;
+        }
+        
+        case 'agent/done': {
+            logger.info('Agent 对话完成: %s', msg.message || '');
+            break;
+        }
+        
+        case 'agent/error': {
+            const [error] = payload || [];
+            logger.error('Agent 错误: %s', error?.message || error);
+            break;
+        }
+        
+        default:
+            logger.debug?.('未处理的事件: %s', event);
+    }
+}
+
+/**
+ * 处理旧格式消息（向后兼容）
+ */
+function handleLegacyMessage(ws: any, msg: any) {
+    const { type } = msg;
+    
+    switch (type) {
+        case 'pong': {
+            logger.debug?.('收到心跳响应');
+            break;
+        }
+        
+        case 'asr/started': {
+            logger.info('ASR 已启动');
+            break;
+        }
+        
+        case 'asr/result': {
+            logger.info('📝 ASR 结果: %s (isFinal: %s)', msg.text, msg.isFinal);
+            // 转发给语音客户端处理
+            if (globalVoiceClient) {
+                (globalVoiceClient as any).handleMessage?.(JSON.stringify(msg));
+            }
+            break;
+        }
+        
+        case 'asr/sentence_begin': {
+            logger.debug('ASR 句子开始');
+            break;
+        }
+        
+        case 'asr/sentence_end': {
+            logger.debug('ASR 句子结束');
+            break;
+        }
+        
+        case 'asr/error': {
+            logger.error('ASR 错误: %s', msg.message);
+            if (globalVoiceClient) {
+                globalVoiceClient.emit('error', new Error(msg.message || 'ASR 错误'));
+            }
+            break;
+        }
+        
+        case 'asr/stopped': {
+            logger.info('ASR 已停止');
+            break;
+        }
+        
+        case 'tts/started': {
+            logger.info('TTS 已启动');
+            break;
+        }
+        
+        case 'tts/audio': {
+            logger.debug('收到 TTS 音频数据');
+            // 转发给语音客户端处理
+            if (globalVoiceClient) {
+                (globalVoiceClient as any).handleMessage?.(JSON.stringify(msg));
+            }
+            break;
+        }
+        
+        case 'tts/error': {
+            logger.error('TTS 错误: %s', msg.message);
+            if (globalVoiceClient) {
+                globalVoiceClient.emit('error', new Error(msg.message || 'TTS 错误'));
+            }
+            break;
+        }
+        
+        case 'tts/stopped': {
+            logger.info('TTS 已停止');
+            break;
+        }
+        
+        case 'agent/content': {
+            logger.debug('Agent 内容: %s', msg.content);
+            break;
+        }
+        
+        case 'agent/tool_call': {
+            logger.debug('Agent 工具调用: %s', JSON.stringify(msg.tools));
+            break;
+        }
+        
+        case 'agent/tool_result': {
+            logger.debug('Agent 工具结果: %s', JSON.stringify(msg));
+            break;
+        }
+        
+        case 'agent/done': {
+            logger.info('Agent 对话完成: %s', msg.message || '');
+            break;
+        }
+        
+        case 'agent/error': {
+            logger.error('Agent 错误: %s', msg.message);
+            break;
+        }
+        
+        case 'status/update': {
+            logger.debug('状态更新: %s', JSON.stringify(msg.client));
+            break;
+        }
+        
+        default:
+            // 转发给语音客户端处理（兼容旧协议）
+            if (globalVoiceClient) {
+                (globalVoiceClient as any).handleMessage?.(JSON.stringify(msg));
+            }
+    }
 }
 
 export function startConnecting(ctx?: Context) {
-    const url = resolveUpstream();
+    const url = buildWebSocketUrl();
     if (!url) {
-        logger.warn('未配置上游，跳过主动连接。请在 client 配置中设置 server 或通过环境变量 EDGE_UPSTREAM 指定。');
+        logger.warn('未配置上游，跳过主动连接。请在 client 配置中设置 server（或 domainId + wsToken）或通过环境变量 EDGE_UPSTREAM 指定。');
         return () => {};
     }
 
@@ -162,7 +462,34 @@ export function startConnecting(ctx?: Context) {
             retryDelay = 3000; // 重置退避
             connecting = false;
             globalWsConnection = ws; // 保存全局 WebSocket 连接（在连接建立后立即设置）
-            try { ws.send('{"key":"ping"}'); } catch { /* ignore */ }
+            
+            // 发送心跳（使用新协议格式）
+            try {
+                ws.send(JSON.stringify({ key: 'ping' }));
+            } catch { /* ignore */ }
+            
+            // 自动订阅常用事件
+            const autoSubscribeEvents = [
+                'asr/result',
+                'asr/sentence_begin',
+                'asr/sentence_end',
+                'asr/error',
+                'tts/audio',
+                'tts/error',
+                'agent/content',
+                'agent/tool_call',
+                'agent/tool_result',
+                'agent/done',
+                'agent/error',
+            ];
+            
+            // 延迟订阅，确保连接完全就绪
+            setTimeout(() => {
+                autoSubscribeEvents.forEach(event => {
+                    sendEvent(ws, 'subscribe', event);
+                    subscribedEvents.add(event);
+                });
+            }, 100);
             
             // 上游连接成功后，先启动 VTube Studio 并等待认证完成，然后再启动其他服务
             // 延迟一点时间，确保 WebSocket 完全就绪
@@ -239,26 +566,62 @@ export function startConnecting(ctx?: Context) {
 
         ws.on('message', async (data: any) => {
             const text = typeof data === 'string' ? data : data.toString('utf8');
-            if (text === 'ping') {
-                try { ws.send('pong'); } catch { /* ignore */ }
+            
+            // 处理心跳（文本格式）
+            if (text === 'ping' || text.trim() === 'ping') {
+                try { 
+                    ws.send('pong'); 
+                } catch { /* ignore */ }
                 return;
             }
-            // 处理可能的 JSON-RPC 响应或其他消息
+            
+            // 处理 JSON 消息
             try {
                 const msg = JSON.parse(text);
+                
+                // 处理心跳响应（JSON 格式）
+                if (msg.type === 'pong' || (msg.key === 'pong')) {
+                    logger.debug?.('收到心跳响应');
+                    return;
+                }
+                
+                // 处理 Cordis 事件系统响应
+                if (msg.ok === 1 && msg.event) {
+                    logger.debug?.('订阅成功: %s', msg.event);
+                    subscribedEvents.add(msg.event);
+                    return;
+                }
+                
+                // 处理事件格式消息（新协议）
+                if (msg.event && msg.payload) {
+                    handleEventMessage(ws, msg);
+                    return;
+                }
+                
+                // 处理旧格式消息（向后兼容）
+                if (msg.type) {
+                    handleLegacyMessage(ws, msg);
+                    return;
+                }
+                
                 // VTube Studio 认证令牌相关的消息需要被其他模块处理，这里只记录
                 if (msg.key === 'vtuber_auth_token_get' || msg.key === 'vtuber_auth_token_save') {
                     logger.debug('收到 VTube Studio 认证令牌消息: %s', msg.key);
                     // 不在这里处理，让其他模块的监听器处理
                     return;
                 }
+                
+                // 其他 key 消息（旧协议）
                 if (msg.key && msg.key !== 'voice_chat_audio') {
-                    // 只记录非音频消息的 key
                     logger.debug?.('上游消息：key=%s', msg.key);
+                    // 转发给语音客户端处理
+                    if (globalVoiceClient) {
+                        (globalVoiceClient as any).handleMessage?.(data);
+                    }
                 }
-                // voice_chat_audio 消息太多，不记录
-            } catch {
+            } catch (e) {
                 // 非 JSON 消息，可能是 ping/pong，不记录
+                logger.debug?.('收到非 JSON 消息: %s', text.substring(0, 100));
             }
         });
 
@@ -335,6 +698,115 @@ export function startConnecting(ctx?: Context) {
 // 导出语音客户端访问接口
 export function getVoiceClient(): VoiceClient | null {
     return globalVoiceClient;
+}
+
+/**
+ * 订阅事件（供外部模块使用）
+ */
+export function subscribeEvent(event: string) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        sendEvent(ws, 'subscribe', event);
+        subscribedEvents.add(event);
+    }
+}
+
+/**
+ * 取消订阅事件（供外部模块使用）
+ */
+export function unsubscribeEvent(event: string) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        sendEvent(ws, 'unsubscribe', event);
+        subscribedEvents.delete(event);
+    }
+}
+
+/**
+ * 发布事件（供外部模块使用）
+ */
+export function publishEvent(event: string, payload: any[] = []) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        sendEvent(ws, 'publish', event, payload);
+    }
+}
+
+/**
+ * ASR 协议：开始 ASR
+ */
+export function startASR() {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/asr/start', []);
+    }
+}
+
+/**
+ * ASR 协议：发送音频数据
+ */
+export function sendASRAudio(audioBase64: string) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/asr/audio', [{ audio: audioBase64 }]);
+    }
+}
+
+/**
+ * ASR 协议：停止 ASR
+ */
+export function stopASR() {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/asr/stop', []);
+    }
+}
+
+/**
+ * TTS 协议：开始 TTS
+ */
+export function startTTS() {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/tts/start', []);
+    }
+}
+
+/**
+ * TTS 协议：发送文本
+ */
+export function sendTTSText(text: string) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/tts/text', [{ text }]);
+    }
+}
+
+/**
+ * TTS 协议：停止 TTS
+ */
+export function stopTTS() {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/tts/stop', []);
+    }
+}
+
+/**
+ * Agent 协议：发送对话消息
+ */
+export function sendAgentChat(message: string, history: Array<{ role: string; content: string }> = []) {
+    const ws = getGlobalWsConnection();
+    if (ws) {
+        // 优先使用新协议格式
+        sendEvent(ws, 'publish', 'client/agent/chat', [{ message, history }]);
+    }
 }
 
 // 全局变量，用于存储 dispose 函数（用于向后兼容）

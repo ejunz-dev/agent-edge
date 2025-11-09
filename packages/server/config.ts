@@ -89,6 +89,8 @@ zigbee2mqtt:
 `;
         const clientConfigDefault = yaml.dump({
             server: '',
+            domainId: '',
+            wsToken: '',
         });
         const providerConfigDefault = `\
 # MCP Provider 配置
@@ -314,6 +316,8 @@ const clientSchema = Schema.object({
         // 对于简单的域名或 HTTP URL，添加斜杠（用于后续转换为 /edge/conn）
         return i.endsWith('/') ? i : `${i}/`;
     }).role('url').default(''),
+    domainId: Schema.string().default(''), // 域 ID（从服务器管理界面获取）
+    wsToken: Schema.string().default(''), // WebSocket 连接令牌（从服务器管理界面生成）
     port: Schema.number().default(5283), // client 模式下的本地服务器端口
     // 语音服务配置（与 serverSchema 保持一致，但默认 enabled: false）
     voice: Schema.object({

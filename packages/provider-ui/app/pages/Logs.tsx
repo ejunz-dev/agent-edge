@@ -11,6 +11,8 @@ export default function Logs() {
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const [logs, setLogs] = useState<any[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // 获取工具列表用于过滤
   const { data: toolsData } = useQuery({
@@ -19,81 +21,80 @@ export default function Logs() {
     refetchInterval: 30000,
   });
 
-  // 初始加载历史日志
-  const { data: initialLogs, refetch: refetchLogs } = useQuery({
-    queryKey: ['provider_logs', level, tool],
-    queryFn: () => {
-      const params = new URLSearchParams();
-      if (level) params.append('level', level);
-      if (tool) params.append('tool', tool);
-      params.append('limit', '100');
-      return fetch(`/api/logs?${params.toString()}`).then((res) => res.json());
-    },
-    refetchInterval: false,
-  });
-
   // 初始化WebSocket连接
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${window.location.host}/api/logs/ws`;
     
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'log') {
-          setLogs((prev) => {
-            const newLogs = [...prev, data.data];
-            // 限制日志数量，避免内存溢出
-            if (newLogs.length > 500) {
-              return newLogs.slice(-500);
-            }
-            return newLogs;
-          });
-        } else if (data.type === 'connected') {
-          console.log('WebSocket connected, receiving logs');
-        }
-      } catch (e) {
-        console.error('Failed to parse WebSocket message', e);
+    const connect = () => {
+      // 清理之前的重连定时器
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
-    };
 
-    ws.onerror = (error) => {
-      console.error('WebSocket error', error);
-    };
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
-    ws.onclose = () => {
-      console.log('WebSocket closed, reconnecting...');
-      // 5秒后重连
-      setTimeout(() => {
-        if (wsRef.current?.readyState === WebSocket.CLOSED) {
-          // 重新初始化连接
-          const newWs = new WebSocket(wsUrl);
-          wsRef.current = newWs;
+      ws.onopen = () => {
+        console.log('[Logs] WebSocket connected to', wsUrl);
+        setIsConnected(true);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          if (data.type === 'log') {
+            setLogs((prev) => {
+              const newLogs = [...prev, data.data];
+              // 限制日志数量，避免内存溢出
+              if (newLogs.length > 500) {
+                return newLogs.slice(-500);
+              }
+              return newLogs;
+            });
+          } else if (data.type === 'connected') {
+            console.log('[Logs] WebSocket connected, receiving logs');
+            setIsConnected(true);
+          }
+        } catch (e) {
+          console.error('[Logs] Failed to parse WebSocket message', e, event.data);
         }
-      }, 5000);
+      };
+
+      ws.onerror = (error) => {
+        console.error('[Logs] WebSocket error', error);
+        setIsConnected(false);
+      };
+
+      ws.onclose = (event) => {
+        console.log('[Logs] WebSocket closed', event.code, event.reason);
+        setIsConnected(false);
+        // 5秒后重连
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (wsRef.current?.readyState === WebSocket.CLOSED || !wsRef.current) {
+            console.log('[Logs] Attempting to reconnect...');
+            connect();
+          }
+        }, 5000);
+      };
     };
+
+    connect();
 
     return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
+      setIsConnected(false);
     };
   }, []);
 
-  // 初始化历史日志
-  useEffect(() => {
-    if (initialLogs?.logs) {
-      setLogs(initialLogs.logs);
-    }
-  }, [initialLogs]);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -146,9 +147,6 @@ export default function Logs() {
               clearable
               style={{ width: 150 }}
             />
-            <Button onClick={refetchLogs} variant="light">
-              刷新
-            </Button>
             <Button onClick={handleClear} variant="light" color="red">
               清空
             </Button>
@@ -203,8 +201,8 @@ export default function Logs() {
           <Text size="sm" c="dimmed">
             共 {filteredLogs.length} 条日志
           </Text>
-          <Text size="sm" c="dimmed">
-            {wsRef.current?.readyState === WebSocket.OPEN ? '🟢 实时连接中' : '🔴 连接断开'}
+          <Text size="sm" c={isConnected ? 'green' : 'red'}>
+            {isConnected ? '🟢 实时连接中' : '🔴 连接断开'}
           </Text>
         </Group>
       </Card>

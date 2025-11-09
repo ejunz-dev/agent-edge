@@ -6,6 +6,7 @@
     "packages/*",
     "packages/machine-setup/frontend",
     "packages/server/node/ui",
+    "packages/server/client/ui",
     "packages/provider-ui"
   ],
   "scripts": {

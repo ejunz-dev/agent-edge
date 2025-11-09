@@ -3,7 +3,7 @@ import { Logger } from '@ejunz/utils';
 import { spawn, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
-import { getVoiceClient } from './client';
+import { getVoiceClient, getGlobalWsConnection } from './client';
 import { config } from '../config';
 
 const logger = new Logger('voice-auto');
@@ -1243,50 +1243,89 @@ function stopAutoVoiceMonitoring() {
 }
 
 let connectionCheckInterval: NodeJS.Timeout | null = null;
+let connectionTimeout: NodeJS.Timeout | null = null;
 let hasStarted = false;
 
 export async function apply(ctx: Context) {
+    // 设置超时：如果 10 秒内连接未建立，仍然启动键盘监听（允许离线使用）
+    connectionTimeout = setTimeout(() => {
+        if (hasStarted) {
+            return;
+        }
+        logger.warn('上游连接超时（10秒），将启动键盘监听（可能无法发送到服务器）');
+        hasStarted = true;
+        if (connectionCheckInterval) {
+            clearInterval(connectionCheckInterval);
+            connectionCheckInterval = null;
+        }
+        
+        // 即使连接失败，也启动键盘监听
+        (async () => {
+            logger.info('开始初始化（上游连接未就绪）...');
+            
+            // 尝试预先建立 ASR 连接（可能失败，但不影响键盘监听）
+            try {
+                logger.info('[实时ASR] 正在尝试建立连接...');
+                await connectRealtimeAsr();
+                logger.info('[实时ASR] 连接已就绪（等待按键按下）');
+            } catch (err: any) {
+                logger.warn('[实时ASR] 连接失败: %s（将在按键按下时重试）', err.message);
+            }
+            
+            // 初始化键盘监听（即使连接失败也可以使用）
+            initKeyboardListener();
+        })();
+    }, 10000); // 10 秒超时
+    
     // 等待 WebSocket 连接建立，并等待 VTube Studio 认证完成后再启动
     connectionCheckInterval = setInterval(() => {
         if (hasStarted) {
             return; // 已经启动，不再检查
         }
 
+        // 优先使用 globalWsConnection，因为它更直接
+        const globalWs = getGlobalWsConnection();
         const voiceClient = getVoiceClient();
+        
+        // 检查 WebSocket 连接状态（优先使用 globalWsConnection）
+        const ws = globalWs || (voiceClient ? (voiceClient as any).ws : null);
+        
+        if (ws) {
+            logger.debug('检查 WebSocket 状态: readyState=%s (1=OPEN)', ws.readyState);
+        } else {
         if (voiceClient) {
-            const ws = (voiceClient as any).ws;
+                logger.debug('VoiceClient 存在但 ws 为 null，等待 ws 初始化...');
+            } else {
+                logger.debug('VoiceClient 和 globalWsConnection 都不存在，等待连接建立...');
+            }
+        }
+        
             if (ws && ws.readyState === 1) { // 1 = OPEN
+            logger.info('检测到 WebSocket 连接已建立，准备启动键盘监听...');
                 if (connectionCheckInterval) {
                     clearInterval(connectionCheckInterval);
                     connectionCheckInterval = null;
                 }
+            if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+                connectionTimeout = null;
+            }
                 hasStarted = true;
                 
-                // 异步等待 VTube Studio 认证完成后再启动
+            // 直接启动，不等待 VTube Studio 认证
                 (async () => {
-                    // 检查 VTube Studio 是否已经认证完成（最多等待 30 秒）
+                // 检查配置，如果 VTube Studio 未启用，直接跳过
                     try {
-                        const { getVTubeStudioClient, waitForVTubeStudioAuthentication } = require('./vtuber-vtubestudio');
-                        const vtsClient = getVTubeStudioClient();
-                        
-                        if (vtsClient) {
-                            // 如果还没有认证，等待认证完成
-                            if (!vtsClient.isConnected()) {
-                                logger.info('等待 VTube Studio 认证完成后再启动语音监听服务（最多 30 秒）...');
-                                const authenticated = await waitForVTubeStudioAuthentication(30000);
-                                if (authenticated) {
-                                    logger.info('✓ VTube Studio 认证完成，可以启动语音监听服务');
+                    const voiceConfig = config.voice || {};
+                    const vtuberConfig = voiceConfig.vtuber || {};
+                    
+                    if (vtuberConfig.enabled !== true) {
+                        logger.debug('VTube Studio 已禁用，直接启动语音监听服务');
                                 } else {
-                                    logger.warn('VTube Studio 认证未完成（30秒超时），继续启动语音监听服务');
-                                }
-                            } else {
-                                logger.debug('VTube Studio 已认证，可以启动语音监听服务');
-                            }
-                        } else {
-                            logger.debug('VTube Studio 未启用，直接启动语音监听服务');
+                        logger.debug('VTube Studio 已启用，但不等待认证，直接启动语音监听服务');
                         }
                     } catch (err: any) {
-                        logger.debug('检查 VTube Studio 状态失败，继续启动语音监听服务: %s', err.message);
+                    logger.debug('检查 VTube Studio 配置失败，继续启动语音监听服务: %s', err.message);
                     }
                     
                     logger.info('上游连接已建立，开始初始化...');
@@ -1306,7 +1345,6 @@ export async function apply(ctx: Context) {
                     
                     // 不在启动时立即启动录音设备，等待按键按下时在 startListening() 中启动
                 })();
-            }
         }
     }, 500);
 
@@ -1315,6 +1353,10 @@ export async function apply(ctx: Context) {
         if (connectionCheckInterval) {
             clearInterval(connectionCheckInterval);
             connectionCheckInterval = null;
+        }
+        if (connectionTimeout) {
+            clearTimeout(connectionTimeout);
+            connectionTimeout = null;
         }
         stopAutoVoiceMonitoring();
         

@@ -27,15 +27,41 @@ export function setGlobalWsConnection(ws: any): void {
 
 function normalizeUpstreamFromHost(host: string): string {
     if (!host) return '';
-    // 支持用户把 host 写成完整 URL
+    
+    // 如果已经是完整的 WebSocket URL（包含路径），直接返回
+    if (/^wss?:\/\//i.test(host)) {
+        try {
+            const url = new URL(host);
+            // 如果 URL 已经包含路径（不只是根路径），直接返回
+            if (url.pathname && url.pathname !== '/') {
+                return host;
+            }
+            // 如果只有根路径，添加 /edge/conn
+            return new URL('/edge/conn', host).toString();
+        } catch {
+            // URL 解析失败，尝试直接使用
+            return host;
+        }
+    }
+    
+    // 支持用户把 host 写成完整 HTTP/HTTPS URL
     if (/^https?:\/\//i.test(host)) {
         const base = host.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+        try {
+            const url = new URL(base);
+            // 如果 URL 已经包含路径（不只是根路径），直接返回转换后的 WebSocket URL
+            if (url.pathname && url.pathname !== '/') {
+                return base;
+            }
+            // 如果只有根路径，添加 /edge/conn
+            return new URL('/edge/conn', base).toString();
+        } catch {
+            // URL 解析失败，尝试添加 /edge/conn
         return new URL(base.endsWith('/') ? 'edge/conn' : '/edge/conn', base).toString();
     }
-    if (/^wss?:\/\//i.test(host)) {
-        return new URL(host.endsWith('/') ? 'edge/conn' : '/edge/conn', host).toString();
     }
-    // 默认使用 wss
+    
+    // 默认使用 wss，添加 /edge/conn
     return `wss://${host}/edge/conn`;
 }
 
@@ -45,7 +71,7 @@ function resolveUpstream(): string | null {
     return target || null;
 }
 
-function startConnecting(ctx?: Context) {
+export function startConnecting(ctx?: Context) {
     const url = resolveUpstream();
     if (!url) {
         logger.warn('未配置上游，跳过主动连接。请在 client 配置中设置 server 或通过环境变量 EDGE_UPSTREAM 指定。');
@@ -143,10 +169,12 @@ function startConnecting(ctx?: Context) {
             setTimeout(async () => {
                 try {
                     const config = require('../config').config as any;
-                    const vtuberConfig = config.vtuber || {};
+                    const voiceConfig = config.voice || {};
+                    const vtuberConfig = voiceConfig.vtuber || {};
                     
                     // 先启动 VTube Studio（如果启用）
-                    if (vtuberConfig.enabled !== false) {
+                    // 检查主开关和引擎类型（只有当 enabled 明确为 true 时才启动）
+                    if (vtuberConfig.enabled === true && vtuberConfig.engine === 'vtubestudio') {
                         const { startVTuberServer } = require('./vtuber-server');
                         const { waitForVTubeStudioAuthentication } = require('./vtuber-vtubestudio');
                         
@@ -167,8 +195,8 @@ function startConnecting(ctx?: Context) {
                         } else {
                             logger.warn('startVTuberServer 函数不存在');
                         }
-                        
-                        // 初始化 OSC 桥接器（如果启用）- 在 VTube Studio 认证后启动
+                    } else if (vtuberConfig.enabled !== false && vtuberConfig.engine === 'osc') {
+                        // 初始化 OSC 桥接器（如果启用）
                         if (vtuberConfig.osc?.enabled) {
                             try {
                                 const { initOSCBridge } = require('./vtuber-osc-bridge');
@@ -182,33 +210,12 @@ function startConnecting(ctx?: Context) {
                         logger.debug('VTuber 功能已禁用');
                     }
                     
-                    // VTube Studio 认证完成（或跳过）后，启动音频播放器服务器
-                    try {
-                        const { startPlayerServer } = require('./audio-player-server');
-                        if (startPlayerServer) {
-                            logger.info('启动音频播放器服务器...');
-                            startPlayerServer();
-                        }
-                    } catch (err: any) {
-                        logger.debug('启动音频播放器服务器失败（将使用本地播放）: %s', err.message);
-                    }
-                    
-                    // VTube Studio 和音频播放器都启动后，再启动 voice-auto
+                    // VTube Studio 初始化完成，准备启动语音监听服务
                     logger.info('VTube Studio 初始化完成，准备启动语音监听服务...');
                     
                 } catch (err: any) {
                     logger.error('启动VTuber控制服务器失败: %s', err.message);
                     logger.error(err.stack);
-                    
-                    // 即使 VTube Studio 启动失败，也要启动音频播放器
-                    try {
-                        const { startPlayerServer } = require('./audio-player-server');
-                        if (startPlayerServer) {
-                            startPlayerServer();
-                        }
-                    } catch (e: any) {
-                        logger.debug('启动音频播放器服务器失败: %s', e.message);
-                    }
                     
                     // 即使失败也继续启动语音服务
                     logger.info('继续启动语音监听服务...');
@@ -330,14 +337,13 @@ export function getVoiceClient(): VoiceClient | null {
     return globalVoiceClient;
 }
 
-export async function apply(ctx: Context) {
-    // 使用定时器持有清理函数，避免类型不匹配的事件绑定
-    const dispose = startConnecting(ctx);
+// 全局变量，用于存储 dispose 函数（用于向后兼容）
+let globalDispose: (() => void) | null = null;
     
-    // 优雅关闭
+// 优雅关闭处理（保留用于进程退出时的清理）
     const cleanup = () => {
         try {
-            dispose();
+        if (globalDispose) globalDispose();
         } catch (err: any) {
             logger.error('清理客户端连接失败: %s', err.message);
         }
@@ -356,10 +362,9 @@ export async function apply(ctx: Context) {
         // Windows 上监听关闭事件
         process.on('exit', () => {
             try {
-                dispose();
+            if (globalDispose) globalDispose();
             } catch { /* ignore */ }
         });
-    }
 }
 
 

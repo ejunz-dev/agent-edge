@@ -34,7 +34,7 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/mcp-tools-api')),
             c.plugin(require('./handler/voice-config')),
             c.plugin(require('./handler/edge')),
-            c.plugin(require('./handler/client')),
+            // c.plugin(require('./handler/client')), // 注释掉 edge2client
             c.plugin(require('./handler/asr-proxy')),
                 c.plugin(require('./handler/zigbee2mqtt')),
             c.plugin(require('./handler/audio-player')),
@@ -46,12 +46,34 @@ async function applyServer(ctx: Context) {
     });
 }
 
-function applyClient(ctx: Context) {
-    ctx.plugin(require('./client/client'));
-    // 启动自动语音交互
-    ctx.plugin(require('./client/voice-auto'));
-    // 启动音频播放器服务器（client 模式专用）
-    ctx.plugin(require('./client/audio-player-server'));
+async function applyClient(ctx: Context) {
+    // 先启动服务器以提供 client-ui
+    await ctx.plugin(require('./service/server'));
+    // 注册 ClientService
+    const clientSvc = require('./service/client');
+    ctx.plugin(clientSvc.default || clientSvc);
+    
+    await ctx.inject(['server'], async (c) => {
+        await Promise.all([
+            c.plugin(require('./handler/client-ui')),
+            // c.plugin(require('./handler/client')), // 注释掉 edge2client
+            c.plugin(require('./handler/audio-player')),
+        ]);
+        
+        // 等待服务器启动完成
+        await c.server.listen();
+        
+        // 服务器启动后再启动其他服务
+        // 使用事件确保服务器完全就绪
+        await new Promise((resolve) => {
+            // 给服务器一点时间完全启动
+            setTimeout(() => {
+                // 启动自动语音交互
+                ctx.plugin(require('./client/voice-auto'));
+                resolve(undefined);
+            }, 300);
+        });
+    });
 }
 
 function applyNode(ctx: Context) {
@@ -99,7 +121,7 @@ async function applyProvider(ctx: Context) {
 async function apply(ctx) {
     (global as any).__cordis_ctx = ctx;
     if (process.argv.includes('--client')) {
-        applyClient(ctx);
+        await applyClient(ctx);
     } else if (process.argv.includes('--node')) {
         applyNode(ctx);
     } else if (process.argv.includes('--proxy')) {

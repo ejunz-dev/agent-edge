@@ -296,7 +296,72 @@ const serverSchema = Schema.object({
     }),
 }).description('Basic Config');
 const clientSchema = Schema.object({
-    server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
+    server: Schema.transform(String, (i) => {
+        if (!i) return '';
+        // 如果是完整的 WebSocket URL（包含路径或查询参数），不添加斜杠
+        if (/^wss?:\/\//i.test(i)) {
+            try {
+                const url = new URL(i);
+                // 如果已经有路径（不只是根路径）或查询参数，直接返回
+                if ((url.pathname && url.pathname !== '/') || url.search) {
+                    return i;
+                }
+            } catch {
+                // URL 解析失败，直接返回
+                return i;
+            }
+        }
+        // 对于简单的域名或 HTTP URL，添加斜杠（用于后续转换为 /edge/conn）
+        return i.endsWith('/') ? i : `${i}/`;
+    }).role('url').default(''),
+    port: Schema.number().default(5283), // client 模式下的本地服务器端口
+    // 语音服务配置（与 serverSchema 保持一致，但默认 enabled: false）
+    voice: Schema.object({
+        // VTuber 配置
+        vtuber: Schema.object({
+            enabled: Schema.boolean().default(false), // client 模式默认禁用
+            engine: Schema.string().default('vtubestudio').role('radio', ['vtubestudio', 'osc']),
+            vtubestudio: Schema.object({
+                host: Schema.string().default('127.0.0.1'),
+                port: Schema.number().default(8001),
+                apiName: Schema.string().default('Agent Edge VTuber Control'),
+                apiVersion: Schema.string().default('1.0'),
+                authToken: Schema.string().default(''),
+                audioSync: Schema.object({
+                    enabled: Schema.boolean().default(false),
+                    parameterName: Schema.string().default('VoiceVolume'),
+                    updateInterval: Schema.number().default(100),
+                }).default({
+                    enabled: false,
+                    parameterName: 'VoiceVolume',
+                    updateInterval: 100,
+                }),
+            }).default({
+                host: '127.0.0.1',
+                port: 8001,
+                apiName: 'Agent Edge VTuber Control',
+                apiVersion: '1.0',
+                authToken: '',
+                audioSync: { enabled: false, parameterName: 'VoiceVolume', updateInterval: 100 },
+            }),
+            osc: Schema.object({
+                enabled: Schema.boolean().default(false),
+                host: Schema.string().default('127.0.0.1'),
+                port: Schema.number().default(9000),
+            }).default({
+                enabled: false,
+                host: '127.0.0.1',
+                port: 9000,
+            }),
+        }).default({
+            enabled: false, // client 模式默认禁用
+            engine: 'vtubestudio',
+            vtubestudio: { host: '127.0.0.1', port: 8001, apiName: 'Agent Edge VTuber Control', apiVersion: '1.0', authToken: '', audioSync: { enabled: false, parameterName: 'VoiceVolume', updateInterval: 100 } },
+            osc: { enabled: false, host: '127.0.0.1', port: 9000 },
+        }),
+    }).default({
+        vtuber: { enabled: false, engine: 'vtubestudio', vtubestudio: { host: '127.0.0.1', port: 8001, apiName: 'Agent Edge VTuber Control', apiVersion: '1.0', authToken: '', audioSync: { enabled: false, parameterName: 'VoiceVolume', updateInterval: 100 } }, osc: { enabled: false, host: '127.0.0.1', port: 9000 } },
+    }),
 });
 
 const nodeSchema = Schema.object({

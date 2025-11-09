@@ -26,12 +26,13 @@ async function applyServer(ctx: Context) {
     await Promise.all([
         ctx.plugin(require('./service/server')),
         ctx.plugin(require('./service/voice')),
-        ctx.plugin(require('./ejunz')),
     ]);
         await ctx.inject(['server', 'dbservice', 'voice'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/misc')),
             c.plugin(require('./handler/mcp')),
+            c.plugin(require('./handler/mcp-tools-api')),
+            c.plugin(require('./handler/voice-config')),
             c.plugin(require('./handler/edge')),
             c.plugin(require('./handler/client')),
             c.plugin(require('./handler/asr-proxy')),
@@ -40,6 +41,7 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/audio-cache')),
             c.plugin(require('./handler/node')),
         ]);
+        
         c.server.listen();
     });
 }
@@ -77,12 +79,41 @@ function applyNode(ctx: Context) {
     ctx.plugin(require('./client/node'));
 }
 
+async function applyProvider(ctx: Context) {
+    // Provider 模式：启动 MCP Provider 服务器
+    await Promise.all([
+        ctx.plugin(require('./service/server')),
+    ]);
+    await ctx.inject(['server', 'dbservice'], async (c) => {
+        await Promise.all([
+            c.plugin(require('./handler/provider-ui')),
+            c.plugin(require('./handler/provider-mcp')),
+            c.plugin(require('./handler/provider-tools-config')),
+            c.plugin(require('./handler/provider-logs')),
+        ]);
+        
+        c.server.listen();
+    });
+}
+
 async function apply(ctx) {
     (global as any).__cordis_ctx = ctx;
     if (process.argv.includes('--client')) {
         applyClient(ctx);
     } else if (process.argv.includes('--node')) {
         applyNode(ctx);
+    } else if (process.argv.includes('--proxy')) {
+        // Proxy 模式：只启动服务器，不加载其他服务
+        ctx.plugin(DBService);
+        ctx.inject(['dbservice'], (c) => {
+            applyServer(c);
+        });
+    } else if (process.argv.includes('--provider')) {
+        // Provider 模式：启动 MCP Provider 服务器
+        ctx.plugin(DBService);
+        ctx.inject(['dbservice'], (c) => {
+            applyProvider(c);
+        });
     } else {
         ctx.plugin(DBService);
         ctx.inject(['dbservice'], (c) => {

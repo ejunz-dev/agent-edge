@@ -10,7 +10,9 @@ const logger = new Logger('init');
 logger.info('Loading config');
 const isClient = process.argv.includes('--client');
 const isNode = process.argv.includes('--node');
-const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : isNode ? 'node' : 'server'}.yaml`);
+const isProxy = process.argv.includes('--proxy');
+const isProvider = process.argv.includes('--provider');
+const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : isNode ? 'node' : isProvider ? 'provider' : 'server'}.yaml`);
 fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
 // eslint-disable-next-line import/no-mutable-exports
@@ -88,7 +90,23 @@ zigbee2mqtt:
         const clientConfigDefault = yaml.dump({
             server: '',
         });
-        fs.writeFileSync(configPath, isClient ? clientConfigDefault : isNode ? nodeConfigDefault : serverConfigDefault);
+        const providerConfigDefault = `\
+# MCP Provider 配置
+port: 5285
+# WebSocket 接入点配置
+ws:
+  endpoint: '/mcp/ws' # WebSocket 路径
+  enabled: true
+# MCP 工具配置
+tools:
+  get_current_time:
+    enabled: true
+    description: '获取当前时间和日期信息'
+  get_server_status:
+    enabled: true
+    description: '获取服务器状态信息，包括 CPU、内存、系统信息等'
+`;
+        fs.writeFileSync(configPath, isClient ? clientConfigDefault : isNode ? nodeConfigDefault : isProvider ? providerConfigDefault : serverConfigDefault);
         logger.error('Config file generated, please fill in the config.yaml');
         resolve();
     })());
@@ -243,6 +261,39 @@ const serverSchema = Schema.object({
         autoStart: false,
         adapter: '/dev/ttyUSB0',
     }),
+    // 插件配置
+    plugins: Schema.object({
+        voice: Schema.object({
+            enabled: Schema.boolean().default(true),
+            settings: Schema.object({
+                enabled: Schema.boolean().default(true),
+                host: Schema.string().default(''),
+                asr: Schema.object({
+                    provider: Schema.string().default(''), // 'openai', 'qwen-realtime', 'azure', 'baidu', 'custom'
+                    apiKey: Schema.string().default(''),
+                    model: Schema.string().default(''), // OpenAI默认模型，qwen使用 qwen3-asr-flash-realtime
+                    enableServerVad: Schema.boolean().default(true), // true为VAD模式，false为Manual模式
+                    baseUrl: Schema.string().default('wss://dashscope.aliyuncs.com/api-ws/v1/realtime'), // Qwen WebSocket地址（官方格式）
+                    language: Schema.string().default('zh'), // 识别语言
+                }),
+                // TTS (文字转语音) 配置
+                tts: Schema.object({
+                    provider: Schema.string().default(''), // 'openai', 'qwen', 'azure', 'baidu', 'custom'
+                    apiKey: Schema.string().default(''),
+                    endpoint: Schema.string().default(''),
+                    voice: Schema.string().default(''), // OpenAI默认声音，Qwen可用: Cherry等
+                    model: Schema.string().default(''), // Qwen模型
+                    languageType: Schema.string().default(''), // 语言类型
+                }),
+                // AI对话API配置
+                ai: Schema.object({
+                    provider: Schema.string().default('ejunz'), // 'openai', 'ejunz', 'azure', 'custom'
+                    endpoint: Schema.string().default(''),
+                    requestFormat: Schema.string().default('simple'), // 'openai' (标准OpenAI格式) 或 'simple' (简单message格式)
+                }),
+            }),
+        }),
+    }),
 }).description('Basic Config');
 const clientSchema = Schema.object({
     server: Schema.transform(String, (i) => (i.endsWith('/') ? i : `${i}/`)).role('url').required(),
@@ -319,7 +370,38 @@ const nodeSchema = Schema.object({
     }),
 }).description('Node Config');
 
-export const config = (isClient ? clientSchema : isNode ? nodeSchema : serverSchema)(yaml.load(fs.readFileSync(configPath, 'utf8')) as any);
+const providerSchema = Schema.object({
+    port: Schema.number().default(5285),
+    ws: Schema.object({
+        endpoint: Schema.string().default('/mcp/ws'),
+        enabled: Schema.boolean().default(true),
+    }).default({
+        endpoint: '/mcp/ws',
+        enabled: true,
+    }),
+    tools: Schema.object({
+        get_current_time: Schema.object({
+            enabled: Schema.boolean().default(true),
+            description: Schema.string().default('获取当前时间和日期信息'),
+        }).default({
+            enabled: true,
+            description: '获取当前时间和日期信息',
+        }),
+        get_server_status: Schema.object({
+            enabled: Schema.boolean().default(true),
+            description: Schema.string().default('获取服务器状态信息，包括 CPU、内存、系统信息等'),
+        }).default({
+            enabled: true,
+            description: '获取服务器状态信息，包括 CPU、内存、系统信息等',
+        }),
+    }).default({
+        get_current_time: { enabled: true, description: '获取当前时间和日期信息' },
+        get_server_status: { enabled: true, description: '获取服务器状态信息，包括 CPU、内存、系统信息等' },
+    }),
+    viewPass: Schema.string().default(randomstring(8)),
+}).description('Provider Config');
+
+export const config = (isClient ? clientSchema : isNode ? nodeSchema : isProvider ? providerSchema : serverSchema)(yaml.load(fs.readFileSync(configPath, 'utf8')) as any);
 export const saveConfig = () => {
     fs.writeFileSync(configPath, yaml.dump(config));
 };

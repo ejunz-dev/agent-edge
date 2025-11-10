@@ -8,6 +8,11 @@ const logger = new Logger('node-mcp-zigbee');
 export const zigbeeListDevicesTool = {
     name: 'zigbee_list_devices',
     description: '列出所有可用的 Zigbee 设备（开关、插座等），返回设备的基本信息和标识符。当用户询问"有哪些设备"、"设备列表"、"查看设备"等问题时，应该主动调用此工具。当需要查询或控制设备但用户没有指定设备ID时，也应该先调用此工具获取设备列表。',
+    inputSchema: {
+        type: 'object',
+        properties: {},
+        required: [],
+    },
     parameters: {
         type: 'object',
         properties: {},
@@ -48,13 +53,23 @@ export async function callZigbeeListDevicesTool(ctx: Context, args: any): Promis
 // 获取设备状态
 export const zigbeeGetDeviceStatusTool = {
     name: 'zigbee_get_device_status',
-    description: '获取指定 Zigbee 设备的当前状态（开关状态、在线状态等）。当用户询问"开关状态"、"设备状态"、"什么情况"、"开还是关"、"是否开启"等问题时，应该主动调用此工具查询设备状态。如果用户没有明确指定设备ID，应该先调用 zigbee_list_devices 获取设备列表，如果只有一个设备则使用该设备的 deviceId，如果有多个设备则询问用户要查询哪个设备。',
+    description: '获取指定 Zigbee 设备的当前状态（开关状态、在线状态等）。当用户询问"开关状态"、"设备状态"、"什么情况"、"开还是关"、"是否开启"等问题时，应该主动调用此工具查询设备状态。**重要：调用此工具时必须提供 deviceId 参数。**如果用户没有明确指定设备ID，应该先调用 zigbee_list_devices 获取设备列表，然后从返回的设备列表中选择一个设备的 deviceId 作为参数。如果只有一个设备，使用该设备的 deviceId；如果有多个设备，使用用户提到的设备名称或从上下文推断的设备ID。',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            deviceId: {
+                type: 'string',
+                description: '**必需参数**：设备 IEEE 地址或友好名称（例如 "0xa4c1388b3518f6ce"）。如果用户没有明确指定，必须先从 zigbee_list_devices 获取设备列表，然后从返回的设备中选择一个设备的 deviceId 字段值。如果只有一个设备，使用该设备的 deviceId；如果有多个设备，使用用户提到的设备名称或从上下文推断的设备ID。不能为空。',
+            },
+        },
+        required: ['deviceId'],
+    },
     parameters: {
         type: 'object',
         properties: {
             deviceId: {
                 type: 'string',
-                description: '设备 IEEE 地址或友好名称。如果用户没有明确指定，应该从上下文或最近查询的设备中获取。如果只有一个设备，直接使用该设备的 deviceId。可通过 zigbee_list_devices 获取设备列表。',
+                description: '**必需参数**：设备 IEEE 地址或友好名称（例如 "0xa4c1388b3518f6ce"）。如果用户没有明确指定，必须先从 zigbee_list_devices 获取设备列表，然后从返回的设备中选择一个设备的 deviceId 字段值。如果只有一个设备，使用该设备的 deviceId；如果有多个设备，使用用户提到的设备名称或从上下文推断的设备ID。不能为空。',
             },
         },
         required: ['deviceId'],
@@ -125,18 +140,33 @@ export async function callZigbeeGetDeviceStatusTool(ctx: Context, args: any): Pr
 // 控制设备开关
 export const zigbeeControlTool = {
     name: 'zigbee_control_device',
-    description: '控制 Zigbee 设备的开关状态。支持开（ON）、关（OFF）、切换（TOGGLE）。如果用户说"开启他/它"或"关闭它"等，且上下文中有最近查询过的设备，应该使用该设备的 deviceId。如果只有一个设备，也可以直接使用该设备ID。',
+    description: '控制 Zigbee 设备的开关状态。支持开（ON）、关（OFF）、切换（TOGGLE）。**重要：调用此工具时必须提供 deviceId 和 state 两个参数。**如果用户说"开启他/它"或"关闭它"等，且上下文中有最近查询过的设备，应该使用该设备的 deviceId。如果用户没有明确指定设备，必须先调用 zigbee_list_devices 获取设备列表，然后从返回的设备中选择一个设备的 deviceId。state 参数根据用户的意图设置：用户说"开"、"打开"、"开启"等时使用 "ON"；用户说"关"、"关闭"等时使用 "OFF"；用户说"切换"、"反转"等时使用 "TOGGLE"。',
+    inputSchema: {
+        type: 'object',
+        properties: {
+            deviceId: {
+                type: 'string',
+                description: '**必需参数**：设备 IEEE 地址或友好名称（例如 "0xa4c1388b3518f6ce"）。如果用户没有明确指定设备，必须先从 zigbee_list_devices 获取设备列表，然后从返回的设备中选择一个设备的 deviceId 字段值。如果只有一个设备，使用该设备的 deviceId；如果有多个设备，使用用户提到的设备名称或从上下文推断的设备ID。不能为空。',
+            },
+            state: {
+                type: 'string',
+                enum: ['ON', 'OFF', 'TOGGLE'],
+                description: '**必需参数**：设备状态。ON 表示开启（当用户说"开"、"打开"、"开启"等时使用）；OFF 表示关闭（当用户说"关"、"关闭"等时使用）；TOGGLE 表示切换当前状态（当用户说"切换"、"反转"等时使用）。不能为空。',
+            },
+        },
+        required: ['deviceId', 'state'],
+    },
     parameters: {
         type: 'object',
         properties: {
             deviceId: {
                 type: 'string',
-                description: '设备 IEEE 地址或友好名称。如果用户没有明确指定设备，应该从上下文或最近查询的设备列表中获取。如果只有一个设备，使用该设备的 deviceId。可通过 zigbee_list_devices 获取设备列表。',
+                description: '**必需参数**：设备 IEEE 地址或友好名称（例如 "0xa4c1388b3518f6ce"）。如果用户没有明确指定设备，必须先从 zigbee_list_devices 获取设备列表，然后从返回的设备中选择一个设备的 deviceId 字段值。如果只有一个设备，使用该设备的 deviceId；如果有多个设备，使用用户提到的设备名称或从上下文推断的设备ID。不能为空。',
             },
             state: {
                 type: 'string',
                 enum: ['ON', 'OFF', 'TOGGLE'],
-                description: '设备状态：ON 表示开启（开、打开、开启等），OFF 表示关闭（关、关闭等），TOGGLE 表示切换当前状态（切换、反转等）',
+                description: '**必需参数**：设备状态。ON 表示开启（当用户说"开"、"打开"、"开启"等时使用）；OFF 表示关闭（当用户说"关"、"关闭"等时使用）；TOGGLE 表示切换当前状态（当用户说"切换"、"反转"等时使用）。不能为空。',
             },
         },
         required: ['deviceId', 'state'],

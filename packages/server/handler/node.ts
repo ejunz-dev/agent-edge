@@ -13,7 +13,131 @@ export const nodeTools = new Map<string, Array<{
     name: string;
     description: string;
     inputSchema: any;
+    parameters?: any;
+    metadata?: Record<string, any>;
 }>>();
+
+type NodeToolRecord = {
+    name: string;
+    description: string;
+    inputSchema: any;
+    parameters?: any;
+    metadata?: Record<string, any>;
+};
+
+async function persistNodeTools(handler: NodeConnectionHandler, nodeId: string, host: string, port: number, rawTools: any[]): Promise<NodeToolRecord[]> {
+    const ctx = handler.ctx;
+    const db = (ctx as any).db?.mcptool ? (ctx as any).db.mcptool : null;
+    const now = Date.now();
+    const toolsArray = Array.isArray(rawTools) ? rawTools : [];
+    const normalizedTools: NodeToolRecord[] = [];
+    const seenDocIds = new Set<string>();
+
+    let existingDocs: any[] = [];
+    if (db) {
+        try {
+            existingDocs = await Promise.race([
+                db.find({ server: nodeId }),
+                new Promise<any[]>((_, reject) => 
+                    setTimeout(() => reject(new Error('数据库查询超时')), 5000)
+                ),
+            ]);
+        } catch (e) {
+            logger.warn('读取 MCP 工具数据库失败: %s', (e as Error).message);
+            // 数据库查询失败不影响工具注册，继续处理
+        }
+    }
+    const existingMap = new Map<string, any>(existingDocs.map((doc) => [doc._id, doc]));
+
+    for (const tool of toolsArray) {
+        if (!tool || !tool.name) continue;
+        const name = String(tool.name);
+        const inputSchema = tool.inputSchema || tool.parameters || { type: 'object', properties: {} };
+        const defaultDescription = tool.metadata?.defaultDescription || tool.description || '';
+        const docId = tool.metadata?.docId || `node:${nodeId}:${name}`;
+        seenDocIds.add(docId);
+        const existing = existingMap.get(docId);
+        const description = existing?.description ?? (tool.description || defaultDescription);
+        const metadata = {
+            ...(existing?.metadata || {}),
+            ...(tool.metadata || {}),
+            nodeId,
+            nodeHost: host,
+            nodePort: port,
+            defaultDescription,
+            status: 'online',
+            syncedAt: now,
+            docId,
+        };
+
+        normalizedTools.push({
+            name,
+            description,
+            inputSchema,
+            parameters: tool.parameters || inputSchema,
+            metadata,
+        });
+
+        if (!db) continue;
+        try {
+            await Promise.race([
+                db.update(
+                    { _id: docId },
+                    {
+                        $set: {
+                            _id: docId,
+                            name,
+                            description,
+                            server: nodeId,
+                            callCount: existing?.callCount ?? 0,
+                            lastCalled: existing?.lastCalled,
+                            createdAt: existing?.createdAt ?? now,
+                            metadata,
+                        },
+                    },
+                    { upsert: true },
+                ),
+                new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('数据库更新超时')), 3000)
+                ),
+            ]);
+        } catch (e) {
+            logger.warn('更新 MCP 工具数据库失败 (%s/%s): %s', nodeId, name, (e as Error).message);
+            // 数据库更新失败不影响工具注册，继续处理其他工具
+        }
+    }
+
+    if (db) {
+        for (const doc of existingDocs) {
+            if (seenDocIds.has(doc._id)) continue;
+            const metadata = {
+                ...(doc.metadata || {}),
+                nodeId,
+                nodeHost: host,
+                nodePort: port,
+                status: 'offline',
+                syncedAt: now,
+            };
+            try {
+                await Promise.race([
+                    db.update({ _id: doc._id }, { $set: { metadata } }),
+                    new Promise((_, reject) => 
+                        setTimeout(() => reject(new Error('数据库更新超时')), 2000)
+                    ),
+                ]);
+            } catch (e) {
+                logger.warn('标记离线 MCP 工具失败 (%s): %s', doc._id, (e as Error).message);
+                // 标记离线失败不影响主流程
+            }
+        }
+    }
+
+    nodeTools.set(nodeId, normalizedTools);
+    try {
+        (ctx as any).emit?.('node/tools-updated', nodeId, normalizedTools);
+    } catch {}
+    return normalizedTools;
+}
 
 export class NodeConnectionHandler extends ConnectionHandler<Context> {
     private nodeId?: string;
@@ -29,48 +153,92 @@ export class NodeConnectionHandler extends ConnectionHandler<Context> {
     }
 
     async message(msg: any) {
-        if (typeof msg === 'object' && msg.type === 'init') {
-            this.nodeId = msg.nodeId || `node_${Date.now()}`;
+        try {
+            logger.debug('收到 Node 消息: type=%s, nodeId=%s', msg?.type, msg?.nodeId);
             
-            // 从初始化消息中获取 Node 地址（如果提供）
+            if (!msg || typeof msg !== 'object') {
+                logger.debug('收到无效消息: %o', msg);
+                return;
+            }
+
+            if (msg.type === 'init') {
+                logger.info('处理 Node init 消息: nodeId=%s, tools=%d', msg.nodeId, Array.isArray(msg.tools) ? msg.tools.length : 0);
+            this.nodeId = (msg.nodeId || this.nodeId || `node_${Date.now()}`).toString();
             if (msg.host) this.nodeHost = msg.host;
-            if (msg.port) this.nodePort = parseInt(String(msg.port), 10);
-            
-            // 从 server 配置获取 Broker 信息
+            if (msg.port) {
+                const parsedPort = Number(msg.port);
+                if (!Number.isNaN(parsedPort)) this.nodePort = parsedPort;
+            }
+
             const brokerConfig = (config as any).mqtt || (config as any).zigbee2mqtt || {};
             this.mqttUrl = brokerConfig.mqttUrl || process.env.MQTT_URL || 'mqtt://localhost:1883';
-            
-            // 注册这个 node（存储连接信息和地址）
+
             connectedNodes.set(this.nodeId, this);
-            // 存储 Node 地址信息（用于工具调用）
             (this as any).nodeHost = this.nodeHost;
             (this as any).nodePort = this.nodePort;
-            
-            // 存储 node 的工具列表
-            if (Array.isArray(msg.tools)) {
-                nodeTools.set(this.nodeId, msg.tools);
-                logger.info('Node %s 注册了 %d 个工具: %s', this.nodeId, msg.tools.length, msg.tools.map((t: any) => t.name).join(', '));
-                // 触发工具更新事件（通过 emit）
+
+                // 先发送 broker 配置，确保连接保持
                 try {
-                    (this.ctx as any).emit('node/tools-updated', this.nodeId, msg.tools);
-                } catch {}
+                    this.send({
+                        type: 'broker-config',
+                        mqttUrl: this.mqttUrl,
+                        baseTopic: brokerConfig.baseTopic || 'zigbee2mqtt',
+                        username: brokerConfig.username || '',
+                        password: brokerConfig.password || '',
+                    });
+                    logger.debug('已发送 broker-config 消息给 Node %s', this.nodeId);
+                } catch (e) {
+                    logger.error('发送 broker-config 失败: %s', (e as Error).message);
+                }
+
+                logger.info('Node connected: %s, Broker: %s, Address: %s:%d', this.nodeId, this.mqttUrl, this.nodeHost, this.nodePort);
+                
+                // 异步执行持久化，不阻塞消息处理
+                persistNodeTools(
+                    this,
+                    this.nodeId,
+                    this.nodeHost || 'localhost',
+                    this.nodePort || 5284,
+                    Array.isArray(msg.tools) ? msg.tools : [],
+                ).then((persisted) => {
+                    logger.info('Node %s 注册了 %d 个工具', this.nodeId, persisted.length);
+                }).catch((e) => {
+                    logger.error('Node %s 工具注册持久化失败: %s', this.nodeId, (e as Error).message);
+                    logger.debug('错误堆栈: %s', (e as Error).stack);
+                    // 不因为持久化失败而关闭连接，只记录错误
+                });
+                
+                return;
             }
-            
-            // 发送 Broker 配置给 node
-            this.send({
-                type: 'broker-config',
-                mqttUrl: this.mqttUrl,
-                baseTopic: brokerConfig.baseTopic || 'zigbee2mqtt',
-                username: brokerConfig.username || '',
-                password: brokerConfig.password || '',
+
+        if (msg.type === 'tools-update') {
+            if (!this.nodeId) {
+                logger.warn('收到 tools-update 但 nodeId 未初始化');
+                return;
+            }
+            if (msg.host) this.nodeHost = msg.host;
+            if (msg.port) {
+                const parsedPort = Number(msg.port);
+                if (!Number.isNaN(parsedPort)) this.nodePort = parsedPort;
+            }
+            // 异步执行持久化，不阻塞消息处理
+            persistNodeTools(
+                this,
+                this.nodeId,
+                this.nodeHost || 'localhost',
+                this.nodePort || 5284,
+                Array.isArray(msg.tools) ? msg.tools : [],
+            ).then((persisted) => {
+                logger.info('Node %s 更新了 %d 个工具', this.nodeId, persisted.length);
+            }).catch((e) => {
+                logger.error('Node %s 工具更新失败: %s', this.nodeId, (e as Error).message);
+                logger.debug('错误堆栈: %s', (e as Error).stack);
+                // 不因为更新失败而关闭连接，只记录错误
             });
-            
-            logger.info('Node connected: %s, Broker: %s, Address: %s:%d', this.nodeId, this.mqttUrl, this.nodeHost, this.nodePort);
             return;
         }
-        
-        // 处理工具调用请求（从 Server 转发来的）
-        if (typeof msg === 'object' && msg.type === 'tool-call') {
+
+        if (msg.type === 'tool-call') {
             const { toolName, arguments: args, requestId } = msg;
             try {
                 // 转发到 Node 执行（这里 Node 应该自己处理，或者通过 HTTP API）
@@ -91,12 +259,17 @@ export class NodeConnectionHandler extends ConnectionHandler<Context> {
             }
             return;
         }
-        
-        // 转发其他消息
-        if (typeof msg === 'object' && msg.type) {
-            try {
-                (this.ctx as any).emit('node/message', this.nodeId, msg);
-            } catch {}
+
+            if (msg.type) {
+                logger.debug('收到未处理的消息类型: %s', msg.type);
+                try {
+                    (this.ctx as any).emit('node/message', this.nodeId, msg);
+                } catch {}
+            }
+        } catch (e) {
+            logger.error('处理 Node 消息时出错: %s', (e as Error).message);
+            logger.debug('错误堆栈: %s', (e as Error).stack);
+            // 不关闭连接，只记录错误
         }
     }
 
@@ -105,10 +278,26 @@ export class NodeConnectionHandler extends ConnectionHandler<Context> {
             connectedNodes.delete(this.nodeId);
             nodeTools.delete(this.nodeId);
             logger.info('Node disconnected: %s', this.nodeId);
-            // 触发工具更新事件
             try {
                 (this.ctx as any).emit('node/tools-updated', this.nodeId, []);
             } catch {}
+            const db = (this.ctx as any).db?.mcptool ? (this.ctx as any).db.mcptool : null;
+            if (db) {
+                try {
+                    const docs = await db.find({ server: this.nodeId });
+                    const now = Date.now();
+                    for (const doc of docs) {
+                        const metadata = {
+                            ...(doc.metadata || {}),
+                            status: 'offline',
+                            syncedAt: now,
+                        };
+                        await db.update({ _id: doc._id }, { $set: { metadata } });
+                    }
+                } catch (e) {
+                    logger.warn('标记 Node 工具离线失败 (%s): %s', this.nodeId, (e as Error).message);
+                }
+            }
         }
     }
 }

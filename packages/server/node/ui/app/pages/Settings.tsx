@@ -9,6 +9,7 @@ import {
   PasswordInput,
   Stack,
   Switch,
+  Tabs,
   Text,
   TextInput,
   Title,
@@ -16,7 +17,7 @@ import {
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { IconReload, IconDots, IconPlus, IconTrash } from '@tabler/icons-react';
+import { IconReload, IconDots, IconPlus, IconTrash, IconPlug, IconApi } from '@tabler/icons-react';
 import React, { useState, useEffect } from 'react';
 
 interface ConfigSchema {
@@ -272,14 +273,87 @@ export default function Settings() {
     setLocalConfig({ ...localConfig, brokers: newBrokers });
   };
 
-  if (isLoading) {
+  // MCP Provider 配置
+  const { data: mcpConfigData, isLoading: mcpConfigLoading } = useQuery({
+    queryKey: ['node-mcp-config'],
+    queryFn: async () => {
+      const res = await fetch('/api/node/mcp-config');
+      if (!res.ok) throw new Error('获取 MCP 配置失败');
+      return res.json();
+    },
+  });
+
+  const [localMCPConfig, setLocalMCPConfig] = useState<any>(null);
+
+  useEffect(() => {
+    if (mcpConfigData?.ws) {
+      setLocalMCPConfig(mcpConfigData.ws);
+    }
+  }, [mcpConfigData]);
+
+  const saveMCPConfigMutation = useMutation({
+    mutationFn: async (newConfig: any) => {
+      const res = await fetch('/api/node/mcp-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ws: newConfig }),
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || '保存配置失败');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['node-mcp-config'] });
+      notifications.show({
+        title: '成功',
+        message: 'MCP Provider 配置已保存',
+        color: 'green',
+      });
+    },
+    onError: (error: Error) => {
+      notifications.show({
+        title: '错误',
+        message: error.message,
+        color: 'red',
+      });
+    },
+  });
+
+  const mcpConfig = localMCPConfig || mcpConfigData?.ws || {
+    endpoint: '',
+    localEndpoint: '/mcp/ws',
+    enabled: true,
+  };
+
+  const handleMCPConfigChange = (key: string, value: any) => {
+    if (!localMCPConfig) return;
+    setLocalMCPConfig({ ...localMCPConfig, [key]: value });
+  };
+
+  if (isLoading || mcpConfigLoading) {
     return <div>加载中...</div>;
   }
 
   return (
     <Stack gap="md">
-      <Group justify="space-between">
-        <Title order={2}>MQTT Bridge 配置</Title>
+      <Title order={2}>配置</Title>
+      
+      <Tabs defaultValue="mqtt-bridge">
+        <Tabs.List>
+          <Tabs.Tab value="mqtt-bridge" leftSection={<IconPlug size={16} />}>
+            MQTT Bridge
+          </Tabs.Tab>
+          <Tabs.Tab value="mcp-provider" leftSection={<IconApi size={16} />}>
+            MCP Provider
+          </Tabs.Tab>
+        </Tabs.List>
+
+        <Tabs.Panel value="mqtt-bridge" pt="md">
+          <Stack gap="md">
+            <Group justify="space-between">
+              <Title order={3}>MQTT Bridge 配置</Title>
         <Button
           leftSection={<IconReload size={16} />}
           onClick={() => {
@@ -434,6 +508,76 @@ export default function Settings() {
           </Stack>
         )}
       </Paper>
+          </Stack>
+        </Tabs.Panel>
+
+        <Tabs.Panel value="mcp-provider" pt="md">
+          <Stack gap="md">
+            <Group justify="space-between">
+              <Title order={3}>MCP Provider 配置</Title>
+              <Button
+                leftSection={<IconReload size={16} />}
+                onClick={() => {
+                  if (localMCPConfig) {
+                    saveMCPConfigMutation.mutate(localMCPConfig);
+                  }
+                }}
+                loading={saveMCPConfigMutation.isPending}
+                disabled={!localMCPConfig}
+              >
+                保存配置
+              </Button>
+            </Group>
+
+            <Paper withBorder p="md">
+              <Title order={4} mb="md">
+                基础设置
+              </Title>
+
+              <ConfigItem
+                label="是否启用 MCP Provider"
+                value={mcpConfig.enabled}
+                onChange={(val) => handleMCPConfigChange('enabled', val)}
+                type="boolean"
+                description="启用后，Node 将作为 MCP Provider 提供工具给上游服务器"
+              />
+
+              <ConfigItem
+                label="上游 MCP Endpoint"
+                value={mcpConfig.endpoint || ''}
+                onChange={(val) => handleMCPConfigChange('endpoint', val)}
+                type="string"
+                description="上游 MCP WebSocket endpoint 完整 URL，例如: wss://example.com/mcp/ws?token=xxx"
+              />
+
+              <ConfigItem
+                label="本地 WebSocket 路径"
+                value={mcpConfig.localEndpoint || '/mcp/ws'}
+                onChange={(val) => handleMCPConfigChange('localEndpoint', val)}
+                type="string"
+                description="本地 WebSocket 服务器路径，用于接收外部 MCP 请求"
+              />
+            </Paper>
+
+            <Paper withBorder p="md">
+              <Title order={4} mb="md">
+                说明
+              </Title>
+              <Stack gap="xs">
+                <Text size="sm" c="dimmed">
+                  • <strong>上游 MCP Endpoint</strong>: 配置后，Node 将作为客户端连接到该 endpoint，向上游提供工具
+                </Text>
+                <Text size="sm" c="dimmed">
+                  • <strong>本地 WebSocket 路径</strong>: 本地服务器监听路径，外部可以通过此路径调用 Node 的工具
+                </Text>
+                <Text size="sm" c="dimmed">
+                  • 配置保存后需要重启 Node 服务才能生效
+                </Text>
+              </Stack>
+            </Paper>
+          </Stack>
+        </Tabs.Panel>
+      </Tabs>
     </Stack>
   );
 }

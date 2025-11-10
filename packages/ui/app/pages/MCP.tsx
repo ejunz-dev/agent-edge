@@ -1,13 +1,28 @@
 import {
-  Badge, Button, Card, Code, Group, Paper, ScrollArea, Select, Stack, Text, Title,
+  Badge,
+  Button,
+  Card,
+  Code,
+  Group,
+  Modal,
+  Paper,
+  ScrollArea,
+  Select,
+  Stack,
+  Text,
+  Textarea,
+  Title,
 } from '@mantine/core';
 import { notifications } from '@mantine/notifications';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import React, { useState } from 'react';
 
 export default function MCP() {
+  const queryClient = useQueryClient();
   const [level, setLevel] = useState<string>('');
   const [tool, setTool] = useState<string>('');
+  const [editingTool, setEditingTool] = useState<any | null>(null);
+  const [editedDescription, setEditedDescription] = useState<string>('');
 
   const { data: logsData, refetch: refetchLogs } = useQuery({
     queryKey: ['mcp_logs', level, tool],
@@ -51,11 +66,70 @@ export default function MCP() {
         });
         refetchTools();
         refetchLogs();
+      } else {
+        notifications.show({
+          title: '错误',
+          message: result.error?.message || '工具调用失败',
+          color: 'red',
+        });
       }
     } catch (e) {
       console.error(e);
       notifications.show({ title: '错误', message: '工具调用失败', color: 'red' });
     }
+  };
+
+  const updateToolMutation = useMutation({
+    mutationFn: async ({ _id, description }: { _id: string; description: string }) => {
+      const res = await fetch('/mcp/tools', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ operation: 'update', _id, description }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || '更新失败');
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      notifications.show({
+        title: '成功',
+        message: '工具描述已更新',
+        color: 'green',
+      });
+      queryClient.invalidateQueries({ queryKey: ['mcp_tools'] });
+    },
+    onError: (error: Error) => {
+      notifications.show({
+        title: '错误',
+        message: error.message || '更新失败',
+        color: 'red',
+      });
+    },
+  });
+
+  const handleEditTool = (item: any) => {
+    setEditingTool(item);
+    setEditedDescription(item?.description || item?.metadata?.defaultDescription || '');
+  };
+
+  const handleSaveDescription = () => {
+    if (!editingTool) return;
+    const docId = editingTool._id || editingTool?.metadata?.docId;
+    if (!docId) {
+      notifications.show({ title: '错误', message: '无法确定工具标识，更新失败', color: 'red' });
+      return;
+    }
+    updateToolMutation.mutate(
+      { _id: docId, description: editedDescription },
+      {
+        onSuccess: () => {
+          setEditingTool(null);
+          setEditedDescription('');
+        },
+      },
+    );
   };
 
   const handleSync = async () => {
@@ -68,7 +142,7 @@ export default function MCP() {
             body: JSON.stringify({ operation: 'sync', name: server.name }),
           });
           return res.json();
-        })
+        }),
       );
       notifications.show({ title: '成功', message: `已同步 ${results.length} 个 MCP 服务器`, color: 'green' });
     } catch (e) {
@@ -118,23 +192,53 @@ export default function MCP() {
         <Title order={2} mb="md">MCP 工具 ({toolsData?.total || 0})</Title>
         <ScrollArea h={300}>
           <Stack gap="xs">
-            {toolsData?.tools?.map((tool: any, index: number) => (
-              <Paper key={tool._id || index} p="sm" withBorder>
+            {toolsData?.tools?.map((item: any, index: number) => (
+              <Paper key={item._id || index} p="sm" withBorder>
                 <Group justify="space-between">
-                  <Group>
-                    <Text fw={500}>{tool.name}</Text>
-                    {tool.server && <Badge size="sm">{tool.server}</Badge>}
+                  <Group gap="xs">
+                    <Text fw={500}>{item.name}</Text>
+                    {item.server && <Badge size="sm">{item.server}</Badge>}
+                    {item.metadata?.nodeId && (
+                      <Badge size="sm" color="blue">
+                        节点 {item.metadata.nodeId}
+                      </Badge>
+                    )}
+                    {item.metadata?.status && (
+                      <Badge
+                        size="sm"
+                        color={item.metadata.status === 'online' ? 'green' : 'gray'}
+                      >
+                        {item.metadata.status === 'online' ? '在线' : '离线'}
+                      </Badge>
+                    )}
+                    {item.metadata?.category && (
+                      <Badge size="sm" variant="light">
+                        {item.metadata.category}
+                      </Badge>
+                    )}
                   </Group>
                   <Group>
-                    <Text size="sm">调用: {tool.callCount || 0}</Text>
-                    <Button size="xs" onClick={() => handleTestTool(tool.name)}>
+                    <Text size="sm">调用: {item.callCount || 0}</Text>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      onClick={() => handleEditTool(item)}
+                    >
+                      编辑
+                    </Button>
+                    <Button size="xs" onClick={() => handleTestTool(item.name)}>
                       测试
                     </Button>
                   </Group>
                 </Group>
-                {tool.description && (
+                {item.description && (
                   <Text size="xs" c="dimmed" mt="xs">
-                    {tool.description}
+                    {item.description}
+                  </Text>
+                )}
+                {item.metadata?.friendlyName && (
+                  <Text size="xs" c="dimmed" mt={4}>
+                    设备: {item.metadata.friendlyName} {item.metadata.deviceId ? `(${item.metadata.deviceId})` : ''}
                   </Text>
                 )}
               </Paper>
@@ -192,6 +296,42 @@ export default function MCP() {
           </Stack>
         </ScrollArea>
       </Card>
+
+      <Modal
+        opened={!!editingTool}
+        onClose={() => {
+          setEditingTool(null);
+          setEditedDescription('');
+        }}
+        title={editingTool ? `编辑 ${editingTool.name} 描述` : '编辑工具描述'}
+        centered
+      >
+        <Stack gap="md">
+          <Textarea
+            value={editedDescription}
+            onChange={(event) => setEditedDescription(event.currentTarget.value)}
+            minRows={4}
+            autosize
+          />
+          <Group justify="flex-end">
+            <Button
+              variant="default"
+              onClick={() => {
+                setEditingTool(null);
+                setEditedDescription('');
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              loading={updateToolMutation.isPending}
+              onClick={handleSaveDescription}
+            >
+              保存
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
     </Stack>
   );
 }

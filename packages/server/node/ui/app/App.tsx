@@ -7,6 +7,7 @@ import { Header } from './components/Header';
 import Console from './pages/Console';
 import Dashboard from './pages/Dashboard';
 import Settings from './pages/Settings';
+import MCPTools from './pages/MCPTools';
 
 function DefaultLayout() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
           <Route path="dashboard" element={<Dashboard />} />
           <Route path="console" element={<Console />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="mcp-tools" element={<MCPTools />} />
         </Route>
       </Routes>
     </HashRouter>

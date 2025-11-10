@@ -1,7 +1,11 @@
 // @ts-nocheck
+import crypto from 'node:crypto';
+import os from 'node:os';
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
 import { config } from '../config';
+import { listNodeTools, setDynamicNodeTools, NodeToolRegistryEntry, NodeToolDefinition } from '../mcp-tools/node';
+import { callZigbeeControlTool } from '../mcp-tools/nodeZigbee';
 
 const logger = new Logger('node-client');
 
@@ -382,13 +386,451 @@ function setupDeviceStateListener(ctx: Context, client: any, nodeId: number) {
     }
 }
 
+const NODE_TOOL_REFRESH_INTERVAL = 10 * 60 * 1000;
+
+function sanitizeIdentifier(value: string): string {
+    return String(value || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 48) || 'device';
+}
+
+function normalizeNodeUpstream(target: string): string | null {
+    if (!target) return null;
+    let value = String(target).trim();
+    if (!value) return null;
+    if (/^https?:\/\//i.test(value)) {
+        const url = new URL(value);
+        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+        const path = url.pathname.replace(/\/+$/, '');
+        if (!path || path === '') url.pathname = '/node/conn';
+        else if (!/\/node\/conn$/i.test(path)) url.pathname = `${path}/node/conn`;
+        return url.toString();
+    }
+    if (/^wss?:\/\//i.test(value)) {
+        const url = new URL(value);
+        const path = url.pathname.replace(/\/+$/, '');
+        if (!path || path === '') url.pathname = '/node/conn';
+        else if (!/\/node\/conn$/i.test(path)) url.pathname = `${path}/node/conn`;
+        return url.toString();
+    }
+    if (!value.includes('://')) {
+        return normalizeNodeUpstream(`ws://${value}`);
+    }
+    try {
+        const url = new URL(value);
+        const path = url.pathname.replace(/\/+$/, '');
+        if (!path || path === '') url.pathname = '/node/conn';
+        else if (!/\/node\/conn$/i.test(path)) url.pathname = `${path}/node/conn`;
+        return url.toString();
+    } catch (e) {
+        return null;
+    }
+}
+
+export function resolveNodeId(): string {
+    const explicit = ((config as any).nodeId || process.env.NODE_ID || '').toString().trim();
+    if (explicit) return explicit;
+    const mqttUsername = ((config as any).mqtt?.username || '').toString();
+    if (mqttUsername.includes(':')) {
+        const [, nodePart] = mqttUsername.split(':');
+        if (nodePart && nodePart.trim()) return nodePart.trim();
+    }
+    const host = os.hostname();
+    if (host) return host;
+    return `node-${process.pid}`;
+}
+
+function resolveAdvertisedHost(): string {
+    const candidates = [
+        process.env.NODE_PUBLIC_HOST,
+        (config as any).publicHost,
+        (config as any).advertiseHost,
+        (config as any).host,
+        os.hostname(),
+        'localhost',
+    ];
+    for (const candidate of candidates) {
+        if (candidate && String(candidate).trim()) return String(candidate).trim();
+    }
+    return 'localhost';
+}
+
+function resolveAdvertisedPort(): number {
+    const candidates = [
+        process.env.NODE_PUBLIC_PORT,
+        (config as any).publicPort,
+        (config as any).advertisePort,
+        config.port,
+        5284,
+    ];
+    for (const candidate of candidates) {
+        const num = Number(candidate);
+        if (!Number.isNaN(num) && num > 0) return num;
+    }
+    return 5284;
+}
+
+function flattenExposes(exposes: any): any[] {
+    const result: any[] = [];
+    const walk = (items: any): void => {
+        if (!items) return;
+        if (Array.isArray(items)) {
+            for (const item of items) walk(item);
+            return;
+        }
+        result.push(items);
+        if (Array.isArray(items.features)) walk(items.features);
+        if (Array.isArray(items.children)) walk(items.children);
+    };
+    walk(exposes);
+    return result;
+}
+
+function hasSwitchCapability(device: any): boolean {
+    if (!device) return false;
+    if (device.supportsOnOff === false) return false;
+    const exposures = flattenExposes(device.definition?.exposes || device.exposes || []);
+    if (exposures.length) {
+        if (exposures.some((feature) => {
+            const type = String(feature?.type || '').toLowerCase();
+            const property = String(feature?.property || '').toLowerCase();
+            const name = String(feature?.name || '').toLowerCase();
+            const label = String(feature?.label || '').toLowerCase();
+            return type === 'switch'
+                || type === 'binary'
+                || property === 'state'
+                || property === 'on'
+                || property === 'off'
+                || name === 'state'
+                || label.includes('switch')
+                || label.includes('开关');
+        })) {
+            return true;
+        }
+    }
+    if (device.features && Array.isArray(device.features)) {
+        if (device.features.some((f: any) => String(f?.property || '').toLowerCase() === 'state')) return true;
+    }
+    if (device.state && (device.state.state !== undefined || device.state.on !== undefined)) return true;
+    if (device.definition?.supportsOnOff) return true;
+    return device.supportsOnOff !== false;
+}
+
+export function buildDynamicToolEntries(devices: any[], nodeId: string): NodeToolRegistryEntry[] {
+    const entries: NodeToolRegistryEntry[] = [];
+    const seenTargets = new Set<string>();
+    const sanitizedNode = sanitizeIdentifier(nodeId);
+    for (const device of devices || []) {
+        const controlTargetId = device?.friendly_name || device?.ieee_address || device?.id;
+        if (!controlTargetId) continue;
+        if (seenTargets.has(controlTargetId)) continue;
+        if (!hasSwitchCapability(device)) continue;
+        seenTargets.add(controlTargetId);
+
+        const sanitizedDevice = sanitizeIdentifier(controlTargetId);
+        const hashSource = `${nodeId}:${device?.ieee_address || controlTargetId}`;
+        const uniqueSuffix = crypto.createHash('sha1').update(hashSource).digest('hex').slice(0, 6);
+        const toolName = `node_${sanitizedNode}_${sanitizedDevice}_${uniqueSuffix}_switch`;
+        const actions = ['ON', 'OFF', 'TOGGLE'];
+        const defaultDescription = `控制设备 ${device?.friendly_name || controlTargetId} 的开关`;
+        const parameters = {
+            type: 'object',
+            properties: {
+                state: {
+                    type: 'string',
+                    enum: actions,
+                    description: '开关状态：ON=开启，OFF=关闭，TOGGLE=切换当前状态',
+                },
+            },
+            required: ['state'],
+        };
+        const metadata = {
+            category: 'zigbee-switch',
+            nodeId,
+            deviceId: controlTargetId,
+            friendlyName: device?.friendly_name || controlTargetId,
+            ieeeAddress: device?.ieee_address || controlTargetId,
+            model: device?.definition?.model || device?.model || '',
+            vendor: device?.definition?.vendor || device?.vendor || '',
+            actions,
+            defaultDescription,
+            autoGenerated: true,
+            docId: `node:${nodeId}:${toolName}`,
+        };
+        const entry: NodeToolRegistryEntry = {
+            tool: {
+                name: toolName,
+                description: defaultDescription,
+                inputSchema: parameters,
+                metadata,
+            },
+            handler: async (ctx: Context, args: any) => {
+                const stateRaw = args?.state;
+                const normalizedState = String(stateRaw ?? '').trim().toUpperCase();
+                if (!normalizedState) throw new Error('缺少 state 参数');
+                if (!actions.includes(normalizedState)) {
+                    throw new Error(`state 必须是 ${actions.join(', ')} 之一`);
+                }
+                await callZigbeeControlTool(ctx, { deviceId: controlTargetId, state: normalizedState });
+                return {
+                    success: true,
+                    deviceId: controlTargetId,
+                    state: normalizedState,
+                    friendlyName: metadata.friendlyName,
+                };
+            },
+            metadata,
+            autoGenerated: true,
+        };
+        (entry.tool as any).parameters = parameters;
+        entries.push(entry);
+    }
+    return entries;
+}
+
+function computeEntrySignature(entries: NodeToolRegistryEntry[]): string {
+    if (!entries || !entries.length) return 'empty';
+    const parts = entries.map((entry) => `${entry.tool.name}:${entry.metadata?.deviceId || ''}:${(entry.metadata?.actions || []).join(',')}`);
+    parts.sort();
+    return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
+}
+
+function computeToolsSignature(tools: Array<{ name: string; metadata?: Record<string, any> }>): string {
+    if (!tools || !tools.length) return 'empty';
+    const parts = tools.map((tool) => `${tool.name}:${tool.metadata?.nodeId || ''}:${tool.metadata?.deviceId || ''}`);
+    parts.sort();
+    return crypto.createHash('sha1').update(parts.join('|')).digest('hex');
+}
+
+function decorateToolsForAdvertise(tools: NodeToolDefinition[], nodeId: string, host: string, port: number) {
+    return (tools || []).map((tool) => {
+        const inputSchema = tool.inputSchema || (tool as any).parameters || { type: 'object', properties: {} };
+        const metadata = {
+            defaultDescription: tool.metadata?.defaultDescription || tool.description,
+            autoGenerated: tool.metadata?.autoGenerated ?? false,
+            category: tool.metadata?.category || 'node-core',
+            nodeId,
+            host,
+            port,
+            status: 'online',
+            docId: tool.metadata?.docId || `node:${nodeId}:${tool.name}`,
+            ...tool.metadata,
+        };
+        metadata.nodeId = nodeId;
+        metadata.host = host;
+        metadata.port = port;
+        metadata.status = 'online';
+        metadata.docId = metadata.docId || `node:${nodeId}:${tool.name}`;
+        return {
+            name: tool.name,
+            description: tool.description,
+            inputSchema,
+            parameters: inputSchema,
+            metadata,
+        };
+    });
+}
+
+async function fetchZigbeeDevices(ctx?: Context): Promise<any[]> {
+    if (!ctx) return [];
+    let devices: any[] = [];
+    try {
+        await ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt;
+            if (!svc) return;
+            if (typeof svc.listDevices === 'function') {
+                devices = await svc.listDevices();
+            } else if (Array.isArray(svc.state?.devices)) {
+                devices = svc.state.devices;
+            }
+        });
+    } catch (e) {
+        logger.warn('获取 Zigbee 设备列表失败: %s', (e as Error).message);
+    }
+    return devices;
+}
+
+function setupNodeMCPRegistration(ctx?: Context) {
+    if (!ctx) return () => {};
+    const upstreamUrl = normalizeNodeUpstream(((config as any).upstream || '').toString());
+    if (!upstreamUrl) {
+        logger.warn('未配置上游 MCP 服务器 (config.upstream)，跳过 MCP 工具自动注册');
+        return () => {};
+    }
+
+    let WS: any;
+    try {
+        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+        WS = require('ws');
+    } catch (e) {
+        logger.error('缺少 ws 依赖，请安装依赖 "ws" 以启用 MCP 工具自动注册');
+        return () => {};
+    }
+
+    const nodeId = resolveNodeId();
+    const advertiseHost = resolveAdvertisedHost();
+    const advertisePort = resolveAdvertisedPort();
+
+    let ws: any = null;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let retryDelay = 5000;
+    let stopped = false;
+    let latestToolsPayload: any[] = [];
+    let currentToolsSignature = '';
+    let currentDynamicSignature = '';
+    const listeners: Array<() => void> = [];
+
+    const sendTools = async (mode: 'init' | 'tools-update') => {
+        if (!ws || ws.readyState !== WS.OPEN) return;
+        if (!latestToolsPayload.length) {
+            latestToolsPayload = decorateToolsForAdvertise(listNodeTools(true) as NodeToolDefinition[], nodeId, advertiseHost, advertisePort);
+            currentToolsSignature = computeToolsSignature(latestToolsPayload);
+        }
+        const payload = {
+            type: mode,
+            nodeId,
+            host: advertiseHost,
+            port: advertisePort,
+            tools: latestToolsPayload,
+            toolsHash: computeToolsSignature(latestToolsPayload),
+            timestamp: Date.now(),
+        };
+        try {
+            ws.send(JSON.stringify(payload));
+            logger.info('已向上游同步 %d 个 MCP 工具（%s）', latestToolsPayload.length, mode);
+        } catch (e) {
+            logger.warn('发送 MCP 工具同步消息失败: %s', (e as Error).message);
+        }
+    };
+
+    const rebuildDynamicTools = async (reason: string, devices?: any[], options: { skipPush?: boolean; force?: boolean } = {}) => {
+        try {
+            let targetDevices = devices;
+            if (!Array.isArray(targetDevices) || !targetDevices.length) {
+                targetDevices = await fetchZigbeeDevices(ctx);
+            }
+            const entries = buildDynamicToolEntries(targetDevices, nodeId);
+            const entrySignature = computeEntrySignature(entries);
+            const entriesChanged = entrySignature !== currentDynamicSignature;
+            if (entriesChanged || options.force) {
+                setDynamicNodeTools(entries);
+                currentDynamicSignature = entrySignature;
+                logger.info('自动注册 %d 个 Zigbee MCP 工具（原因: %s）', entries.length, reason);
+            }
+            const decorated = decorateToolsForAdvertise(listNodeTools(true) as NodeToolDefinition[], nodeId, advertiseHost, advertisePort);
+            latestToolsPayload = decorated;
+            const newToolsSignature = computeToolsSignature(decorated);
+            const signatureChanged = newToolsSignature !== currentToolsSignature;
+            currentToolsSignature = newToolsSignature;
+            if (!options.skipPush && (entriesChanged || signatureChanged || options.force) && ws && ws.readyState === WS.OPEN) {
+                await sendTools('tools-update');
+            }
+        } catch (e) {
+            logger.warn('刷新 MCP 工具失败（原因: %s）: %s', reason, (e as Error).message);
+        }
+    };
+
+    const scheduleReconnect = () => {
+        if (stopped) return;
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+        }, retryDelay);
+        logger.info('将在 %d 秒后重试连接 MCP 上游', Math.round(retryDelay / 1000));
+        retryDelay = Math.min(retryDelay * 1.5, 30000);
+    };
+
+    const connect = () => {
+        if (stopped) return;
+        if (ws && (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING)) return;
+        try {
+            ws = new WS(upstreamUrl, { perMessageDeflate: false });
+        } catch (e) {
+            logger.error('连接 MCP 上游失败: %s', (e as Error).message);
+            scheduleReconnect();
+            return;
+        }
+
+        ws.on('open', async () => {
+            logger.info('MCP 上游连接成功: %s', upstreamUrl);
+            retryDelay = 5000;
+            try {
+                await rebuildDynamicTools('ws-open', undefined, { skipPush: true, force: true });
+                await sendTools('init');
+            } catch (e) {
+                logger.warn('初始 MCP 工具注册失败: %s', (e as Error).message);
+            }
+        });
+
+        ws.on('message', (data: any) => {
+            try {
+                const text = typeof data === 'string' ? data : data.toString('utf8');
+                const message = JSON.parse(text);
+                if (message?.type === 'refresh-tools') {
+                    logger.info('接收到上游刷新指令，开始重新同步 MCP 工具');
+                    void rebuildDynamicTools('refresh-command', undefined, { force: true });
+                }
+            } catch (e) {
+                logger.debug?.('解析 MCP 上游消息失败: %s', (e as Error).message);
+            }
+        });
+
+        ws.on('close', (code: number, reason: Buffer) => {
+            logger.warn('MCP 上游连接已关闭 (%s): %s', code, reason?.toString?.() || '');
+            ws = null;
+            if (!stopped) scheduleReconnect();
+        });
+
+        ws.on('error', (err: Error) => {
+            logger.warn('MCP 上游连接错误: %s', err.message);
+        });
+    };
+
+    void rebuildDynamicTools('bootstrap', undefined, { skipPush: true, force: true });
+
+    const disposeDevices = ctx.on?.('zigbee2mqtt/devices' as any, (devs: any[]) => {
+        void rebuildDynamicTools('devices-event', devs);
+    });
+    if (typeof disposeDevices === 'function') listeners.push(disposeDevices);
+
+    const disposeConnected = ctx.on?.('zigbee2mqtt/connected' as any, () => {
+        void rebuildDynamicTools('zigbee-connected');
+    });
+    if (typeof disposeConnected === 'function') listeners.push(disposeConnected);
+
+    const interval = setInterval(() => {
+        void rebuildDynamicTools('scheduled-refresh');
+    }, NODE_TOOL_REFRESH_INTERVAL);
+    listeners.push(() => clearInterval(interval));
+
+    connect();
+
+    return () => {
+        stopped = true;
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        if (ws) {
+            try { ws.close(); } catch { /* ignore */ }
+            ws = null;
+        }
+        for (const dispose of listeners) {
+            try { dispose?.(); } catch { /* ignore */ }
+        }
+    };
+}
+
 function startNodeConnecting(ctx?: Context) {
     // 连接本地MQTT broker（用于zigbee2mqtt控制）
     connectToLocalMqttBroker(ctx);
-    
-    // 远程MQTT Broker 连接已移除（通过 mqttBridge 配置管理）
-    // Node 客户端 WebSocket 连接已移除
-    return () => {};
+    const disposeMcp = setupNodeMCPRegistration(ctx);
+    return () => {
+        try { disposeMcp?.(); } catch { /* ignore */ }
+    };
 }
 
 export async function apply(ctx: Context) {

@@ -72,6 +72,21 @@ export function createMCPDispatchers() {
                     const resultPreview = typeof result === 'object' 
                         ? JSON.stringify(result).substring(0, 200) 
                         : String(result).substring(0, 200);
+                    try {
+                        const docId = `node:${nodeId}:${name}`;
+                        if ((ctx as any).db?.mcptool) {
+                            await (ctx as any).db.mcptool.update(
+                                { _id: docId },
+                                {
+                                    $inc: { callCount: 1 },
+                                    $set: { lastCalled: Date.now() },
+                                },
+                                { upsert: true },
+                            );
+                        }
+                    } catch (dbError) {
+                        logger.warn('[MCP工具调用] %s 调用计数更新失败: %s', name, (dbError as Error).message);
+                    }
                     logger.success('[MCP工具调用] %s 成功 (耗时: %dms) 结果: %s', name, duration, resultPreview);
                     
                     return {

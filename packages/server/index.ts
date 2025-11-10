@@ -72,6 +72,9 @@ function applyNode(ctx: Context) {
         c.plugin(require('./handler/zigbee2mqtt'));
         c.plugin(require('./handler/mqtt-bridge-config'));
         c.plugin(require('./handler/zigbee-console'));
+        c.plugin(require('./handler/node-mcp-tools'));
+        c.plugin(require('./handler/node-mcp-provider'));
+        c.plugin(require('./handler/node-mcp-config'));
         c.server.listen();
     });
     // node client（仅用于本地 MQTT Broker 连接）

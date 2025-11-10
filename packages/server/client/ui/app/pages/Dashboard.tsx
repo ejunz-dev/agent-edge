@@ -33,7 +33,10 @@ export default function Dashboard() {
   // 检查 WebSocket 连接状态
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.host}/edge/conn`;
+    // 在开发模式下，直接连接到后端服务器（避免 webpack-dev-server 代理问题）
+    const isDev = window.location.hostname === 'localhost' && window.location.port === '8082';
+    const host = isDev ? 'localhost:5283' : window.location.host;
+    const wsUrl = `${protocol}//${host}/client-ws`;
     
     let ws: WebSocket | null = null;
     let reconnectTimer: NodeJS.Timeout | null = null;

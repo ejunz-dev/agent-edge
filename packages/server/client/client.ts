@@ -167,7 +167,20 @@ function handleEventMessage(ws: any, msg: any) {
             const [result] = payload || [];
             if (result) {
                 logger.info('📝 ASR 结果: %s (isFinal: %s)', result.text, result.isFinal);
-                // 转发给语音客户端处理
+                // 转发给 voice-auto 处理
+                try {
+                    const { handleRealtimeAsrMessage } = require('./voice-auto');
+                    if (handleRealtimeAsrMessage) {
+                        handleRealtimeAsrMessage({
+                            type: 'conversation.item.input_audio_transcription.completed',
+                            transcript: result.text,
+                            isFinal: result.isFinal,
+                        });
+                    }
+                } catch (e: any) {
+                    logger.debug('转发 ASR 结果到 voice-auto 失败: %s', e.message);
+                }
+                // 也转发给语音客户端处理
                 if (globalVoiceClient) {
                     (globalVoiceClient as any).handleMessage?.(JSON.stringify({
                         type: 'asr/result',
@@ -181,17 +194,51 @@ function handleEventMessage(ws: any, msg: any) {
         
         case 'asr/sentence_begin': {
             logger.debug('ASR 句子开始');
+            // 转发给 voice-auto 处理
+            try {
+                const { handleRealtimeAsrMessage } = require('./voice-auto');
+                if (handleRealtimeAsrMessage) {
+                    handleRealtimeAsrMessage({
+                        type: 'input_audio_buffer.speech_started',
+                    });
+                }
+            } catch (e: any) {
+                logger.debug('转发 ASR 句子开始到 voice-auto 失败: %s', e.message);
+            }
             break;
         }
         
         case 'asr/sentence_end': {
             logger.debug('ASR 句子结束');
+            // 转发给 voice-auto 处理
+            try {
+                const { handleRealtimeAsrMessage } = require('./voice-auto');
+                if (handleRealtimeAsrMessage) {
+                    handleRealtimeAsrMessage({
+                        type: 'input_audio_buffer.speech_stopped',
+                    });
+                }
+            } catch (e: any) {
+                logger.debug('转发 ASR 句子结束到 voice-auto 失败: %s', e.message);
+            }
             break;
         }
         
         case 'asr/error': {
             const [error] = payload || [];
             logger.error('ASR 错误: %s', error?.message || error);
+            // 转发给 voice-auto 处理
+            try {
+                const { handleRealtimeAsrMessage } = require('./voice-auto');
+                if (handleRealtimeAsrMessage) {
+                    handleRealtimeAsrMessage({
+                        type: 'error',
+                        error: { message: error?.message || error || 'ASR 错误' },
+                    });
+                }
+            } catch (e: any) {
+                logger.debug('转发 ASR 错误到 voice-auto 失败: %s', e.message);
+            }
             if (globalVoiceClient) {
                 globalVoiceClient.emit('error', new Error(error?.message || error || 'ASR 错误'));
             }
@@ -209,6 +256,8 @@ function handleEventMessage(ws: any, msg: any) {
                         audio: audioData.audio,
                     }));
                 }
+                // 注意：消息会继续传播到其他监听器（如 ClientUIWebSocketHandler）
+                // 不需要在这里转发，因为 upstreamMessageHandler 会收到原始消息
             }
             break;
         }
@@ -218,6 +267,17 @@ function handleEventMessage(ws: any, msg: any) {
             logger.error('TTS 错误: %s', error?.message || error);
             if (globalVoiceClient) {
                 globalVoiceClient.emit('error', new Error(error?.message || error || 'TTS 错误'));
+            }
+            break;
+        }
+        
+        case 'tts/done': {
+            logger.debug('TTS 音频生成完成');
+            // 可以在这里处理 TTS 完成后的逻辑（如通知前端播放完成）
+            if (globalVoiceClient) {
+                (globalVoiceClient as any).handleMessage?.(JSON.stringify({
+                    type: 'tts/done',
+                }));
             }
             break;
         }
@@ -593,9 +653,19 @@ export function startConnecting(ctx?: Context) {
                 }
                 
                 // 处理事件格式消息（新协议）
-                if (msg.event && msg.payload) {
+                // 支持两种格式：
+                // 1. { key: 'publish', event: 'tts/audio', payload: [...] }
+                // 2. { event: 'tts/audio', payload: [...] }
+                if (msg.key === 'publish' && msg.event && msg.payload) {
+                    if (msg.event === 'tts/audio') {
+                        logger.debug('[client] 收到 TTS 音频事件（将传播到前端）');
+                    }
                     handleEventMessage(ws, msg);
-                    return;
+                    // 注意：不要 return，让消息继续传播到其他监听器（如 ClientUIWebSocketHandler）
+                    // 这样 upstreamMessageHandler 也能收到这个消息并转发到前端
+                } else if (msg.event && msg.payload) {
+                    handleEventMessage(ws, msg);
+                    // 同样不 return，让消息继续传播
                 }
                 
                 // 处理旧格式消息（向后兼容）

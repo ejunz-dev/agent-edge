@@ -126,8 +126,8 @@ logger.info('Building Client UI...');
       },
       proxy: [{
         context: (pathname) => {
-          // 排除 webpack-dev-server 自己的文件和 WebSocket
-          // 但允许所有其他路径代理到后端
+          // 排除 webpack-dev-server 自己的文件和静态资源
+          // 但允许所有其他路径（包括 WebSocket）代理到后端
           return pathname !== '/ws' 
             && !pathname.startsWith('/sockjs-node')
             && pathname !== '/main.js'
@@ -139,6 +139,13 @@ logger.info('Building Client UI...');
         ws: true, // 启用 WebSocket 代理
         changeOrigin: true,
         logLevel: 'debug',
+        onProxyReqWs: (proxyReq, req, socket) => {
+          // WebSocket 代理请求的日志
+          console.log('[WebSocket Proxy] Proxying WebSocket:', req.url);
+        },
+        onError: (err, req, res) => {
+          console.error('[Proxy Error]', err.message);
+        },
       }],
       client: {
         webSocketURL: 'auto://0.0.0.0:0/ws',

@@ -3,7 +3,7 @@ import { Logger } from '@ejunz/utils';
 import { spawn, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
-import { getVoiceClient, getGlobalWsConnection } from './client';
+import { getVoiceClient, getGlobalWsConnection, publishEvent } from './client';
 import { config } from '../config';
 
 const logger = new Logger('voice-auto');
@@ -144,7 +144,6 @@ let failedDevices: string[] = [];
 let isStreaming = false; // 是否正在流式传输音频
 
 // 实时 ASR 相关状态
-let realtimeAsrWs: any = null; // 实时 ASR WebSocket 连接
 let isRealtimeAsrActive = false; // 实时 ASR 是否激活
 let currentTranscription = ''; // 当前转录文本
 let asrConfig: any = null; // ASR 配置
@@ -172,160 +171,67 @@ logger.info('语音监听初始化 (按键控制: %s%s)',
     listenKey);
 
 /**
- * 建立实时 ASR 连接（通过服务器代理）
+ * 建立实时 ASR 连接（通过现有 WebSocket 事件系统）
  */
 async function connectRealtimeAsr(): Promise<void> {
-    if (isRealtimeAsrActive && realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
+    if (isRealtimeAsrActive) {
         logger.debug('实时 ASR 连接已存在');
         return;
     }
 
-    if (!WS) {
-        throw new Error('缺少 ws 模块，请安装: npm install ws');
+    const ws = getGlobalWsConnection();
+    if (!ws || ws.readyState !== 1) {
+        throw new Error('WebSocket 未连接，无法建立 ASR 连接');
     }
 
-    // 获取服务器的 WebSocket 地址
-    const voiceClient = getVoiceClient();
-    if (!voiceClient) {
-        throw new Error('VoiceClient 未初始化，无法获取服务器地址');
+    logger.info('[实时ASR] 通过现有 WebSocket 连接建立 ASR 服务');
+
+    // 标记为已激活（配置由上游服务器提供，不需要客户端发送）
+    isRealtimeAsrActive = true;
+    
+    // 立即完成连接（不需要发送会话配置，上游已有配置）
+    if (connectPromise) {
+        connectPromise.resolve();
+        connectPromise = null;
     }
-
-    const ws = (voiceClient as any).ws;
-    if (!ws || !ws.url) {
-        throw new Error('无法获取服务器地址');
-    }
-
-    // 从 Edge WebSocket URL 构造 ASR 代理 URL
-    // 例如: wss://test.ejunz.com/edge/conn -> wss://test.ejunz.com/asr-proxy
-    const edgeUrl = new URL(ws.url);
-    const asrProxyUrl = `${edgeUrl.protocol === 'wss:' ? 'wss:' : 'ws:'}//${edgeUrl.host}/asr-proxy`;
-
-    logger.info(`连接 ASR 代理服务: ${asrProxyUrl}`);
-
-    // 使用默认 ASR 配置（服务器端会处理实际配置）
-    asrConfig = {
-        provider: 'qwen-realtime',
-        enableServerVad: true,
-        language: 'zh',
-    };
-
-    return new Promise((resolve, reject) => {
-        try {
-            connectPromise = { resolve, reject };
-            realtimeAsrWs = new WS(asrProxyUrl);
-
-            realtimeAsrWs.on('open', () => {
-                logger.info('[实时ASR] 代理连接已建立，等待上游确认...');
-                // 不立即发送session.update，等待connection.opened消息
-                // sendSessionUpdate 会在收到 connection.opened 后调用
-            });
-
-            realtimeAsrWs.on('message', (message: Buffer | string) => {
-                try {
-                    const text = typeof message === 'string' ? message : message.toString('utf8');
-                    const data = JSON.parse(text);
-                    // 只记录重要消息类型，减少日志噪音
-                    if (data.type && !data.type.includes('delta') && !data.type.includes('text')) {
-                        logger.debug('[实时ASR] 收到消息: type=%s', data.type);
-                    }
-                    handleRealtimeAsrMessage(data);
-                } catch (e: any) {
-                    logger.error('[实时ASR] 解析消息失败: %s, raw=%s', e.message, 
-                        typeof message === 'string' ? message.slice(0, 200) : message.toString('utf8').slice(0, 200));
-                }
-            });
-
-            realtimeAsrWs.on('close', (code: number, reason: Buffer) => {
-                logger.info(`[实时ASR] 连接关闭: ${code} - ${reason?.toString() || ''}`);
-                isRealtimeAsrActive = false;
-                realtimeAsrWs = null;
-            });
-
-            realtimeAsrWs.on('error', (err: Error) => {
-                logger.error('[实时ASR] 连接错误: %s', err.message);
-                isRealtimeAsrActive = false;
-                realtimeAsrWs = null;
-                if (connectPromise) {
-                    connectPromise.reject(err);
-                    connectPromise = null;
-                }
-            });
-        } catch (e: any) {
-            isRealtimeAsrActive = false;
-            if (connectPromise) {
-                connectPromise.reject(e);
-                connectPromise = null;
-            }
-        }
-    });
+    logger.debug('[实时ASR] ASR 服务已就绪（配置由上游提供）');
 }
 
 /**
- * 发送会话更新配置
+ * 发送会话更新配置（已废弃：配置由上游服务器提供）
+ * 保留函数以防其他地方调用，但不执行任何操作
  */
 function sendSessionUpdate() {
-    const enableServerVad = asrConfig.enableServerVad !== false;
-    const language = asrConfig.language || 'zh';
-
-    const eventVad = {
-        event_id: `event_${Date.now()}`,
-        type: 'session.update',
-        session: {
-            modalities: ['text'],
-            input_audio_format: 'pcm',
-            sample_rate: 16000,
-            input_audio_transcription: {
-                language
-            },
-            turn_detection: {
-                type: 'server_vad',
-                threshold: 0.2,
-                silence_duration_ms: 800
-            }
-        }
-    };
-
-    const eventNoVad = {
-        event_id: `event_${Date.now()}`,
-        type: 'session.update',
-        session: {
-            modalities: ['text'],
-            input_audio_format: 'pcm',
-            sample_rate: 16000,
-            input_audio_transcription: {
-                language
-            },
-            turn_detection: null
-        }
-    };
-
-    const event = enableServerVad ? eventVad : eventNoVad;
-        // 会话配置已发送，不记录日志以减少噪音
-    
-    if (realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
-        realtimeAsrWs.send(JSON.stringify(event));
-    }
+    // 配置由上游服务器提供，客户端不需要发送
+    logger.debug('[实时ASR] 跳过发送会话配置（由上游提供）');
 }
 
 /**
  * 发送音频块到实时 ASR
  */
 function sendAudioToRealtimeAsr(chunk: Buffer) {
-    if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
-        logger.debug('[实时ASR] 跳过发送音频：连接未就绪 (active=%s, readyState=%s)', 
-            isRealtimeAsrActive, realtimeAsrWs?.readyState);
+    if (!isRealtimeAsrActive) {
+        logger.debug('[实时ASR] 跳过发送音频：ASR 未激活');
+        return;
+    }
+
+    const ws = getGlobalWsConnection();
+    if (!ws || ws.readyState !== 1) {
+        logger.debug('[实时ASR] 跳过发送音频：WebSocket 未连接');
         return;
     }
 
     try {
         const encoded = chunk.toString('base64');
-        const appendEvent = {
-            event_id: `event_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-            type: 'input_audio_buffer.append',
+        
+        // 使用简单的格式，直接发送音频数据
+        // 上游服务器期望 payload 中包含 audio 字段
+        const audioEvent = {
             audio: encoded
         };
 
-        realtimeAsrWs.send(JSON.stringify(appendEvent));
+        // 通过事件系统发送音频数据
+        publishEvent('client/asr/audio', [audioEvent]);
         // 只在debug模式下记录，避免日志过多
         // 音频块已发送，不记录日志以减少噪音
     } catch (e: any) {
@@ -345,8 +251,9 @@ async function commitAndWaitTranscription(): Promise<string> {
                 type: 'input_audio_buffer.commit'
             };
             
-            if (realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
-                realtimeAsrWs.send(JSON.stringify(commitEvent));
+            const ws = getGlobalWsConnection();
+            if (ws && ws.readyState === 1) {
+                publishEvent('client/asr/commit', [commitEvent]);
                 logger.debug('[实时ASR] 发送 commit 事件');
             }
         } else {
@@ -383,31 +290,12 @@ async function commitAndWaitTranscription(): Promise<string> {
 }
 
 /**
- * 处理实时 ASR 消息
+ * 处理实时 ASR 消息（从事件系统接收）
  */
-function handleRealtimeAsrMessage(data: any) {
-    // 处理代理连接成功消息
-    if (data.type === 'connection.opened') {
-        logger.info('[实时ASR] 代理连接已确认，准备发送会话配置');
-        // 确保在连接完全就绪后发送会话配置
-        setTimeout(() => {
-            sendSessionUpdate();
-            isRealtimeAsrActive = true;
-            // 连接建立完成，resolve promise
-            if (connectPromise) {
-                connectPromise.resolve();
-                connectPromise = null;
-            }
-            logger.debug('[实时ASR] 连接完全就绪');
-            
-            // 流式模式：音频已经在实时发送，不需要发送缓存
-        }, 100);
-        return;
-    }
-    
-    // 处理会话更新响应
+export function handleRealtimeAsrMessage(data: any) {
+    // 处理会话更新响应（上游可能发送，但客户端不需要处理）
     if (data.type === 'session.updated') {
-        logger.debug('[实时ASR] 会话配置已确认');
+        logger.debug('[实时ASR] 收到会话配置确认（由上游管理）');
         return;
     }
 
@@ -457,11 +345,10 @@ function handleRealtimeAsrMessage(data: any) {
         }
     }
 
-    // 处理连接关闭
+    // 处理连接关闭（通过事件系统，不再需要单独处理）
     if (data.type === 'connection.closed') {
-        logger.warn('[实时ASR] 连接已关闭: %s - %s', data.code, data.reason || '未知原因');
+        logger.warn('[实时ASR] ASR 服务已关闭: %s - %s', data.code, data.reason || '未知原因');
         isRealtimeAsrActive = false;
-        realtimeAsrWs = null;
     }
 
     // 处理错误
@@ -674,13 +561,15 @@ while ($true) {
         }
     }
     if ($mainPressed -and $modifiersPressed) {
-        Write-Host "KEY_DOWN"
+        [Console]::Out.WriteLine("KEY_DOWN")
+        [Console]::Out.Flush()
         Start-Sleep -Milliseconds $checkInterval
         while ($true) {
             $state = [KeyCheck]::GetAsyncKeyState($mainKey)
             $stillPressed = ($state -band 0x8000) -ne 0
             if (-not $stillPressed) {
-                Write-Host "KEY_UP"
+                [Console]::Out.WriteLine("KEY_UP")
+                [Console]::Out.Flush()
                 break
             }
             Start-Sleep -Milliseconds $checkInterval
@@ -695,24 +584,54 @@ while ($true) {
         });
         
         let buffer = '';
+        
+        // 添加定期检查，确保进程还在运行
+        const healthCheck = setInterval(() => {
+            if (psProcess.killed || psProcess.exitCode !== null) {
+                logger.warn('[键盘监听] PowerShell 进程已退出，代码: %s', psProcess.exitCode);
+                clearInterval(healthCheck);
+                return;
+            }
+        }, 5000);
+        
         psProcess.stdout.on('data', (data: Buffer) => {
             buffer += data.toString();
-            const lines = buffer.split('\n');
+            const lines = buffer.split(/\r?\n/);
             buffer = lines.pop() || '';
             for (const line of lines) {
                 const trimmed = line.trim();
-                if (trimmed === 'KEY_DOWN' && !isListening) {
-                    logger.info('🔔 按键按下，开始监听');
-                    startListening().catch((err) => logger.error('开始监听失败: %s', err.message));
-                } else if (trimmed === 'KEY_UP' && isListening) {
-                    logger.info('🔇 按键松开，停止监听');
-                    stopListening();
+                if (trimmed === 'KEY_DOWN') {
+                    if (!isListening) {
+                        logger.info('🔔 按键按下，开始监听');
+                        startListening().catch((err) => {
+                            logger.error('开始监听失败: %s', err.message);
+                        });
+                    }
+                } else if (trimmed === 'KEY_UP') {
+                    if (isListening) {
+                        logger.info('🔇 按键松开，停止监听');
+                        stopListening();
+                    }
                 }
             }
         });
         
-        iohook = { process: psProcess };
+        // 完全忽略 stderr 输出，不注册任何处理函数
+        // psProcess.stderr 的输出将被丢弃
+        
+        psProcess.on('error', (err: Error) => {
+            logger.error('[键盘监听] PowerShell 进程错误: %s', err.message);
+            clearInterval(healthCheck);
+        });
+        
+        psProcess.on('exit', (code: number) => {
+            logger.warn('[键盘监听] PowerShell 进程退出，代码: %s', code);
+            clearInterval(healthCheck);
+        });
+        
+        iohook = { process: psProcess, healthCheck };
         logger.info('✅ 键盘监听已启动（使用 PowerShell 回退方案）');
+        logger.info('💡 提示：按下 %s 键开始监听，松开停止监听', listenKey);
     } catch (err: any) {
         logger.error('PowerShell 回退方案也失败: %s', err.message);
     }
@@ -727,16 +646,22 @@ async function startListening(): Promise<void> {
     }
     
     // 检查 ASR 连接是否已建立（应该在启动时已建立）
-    if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
-        logger.warn('[实时ASR] 连接未就绪，尝试建立连接...');
+    if (!isRealtimeAsrActive) {
+        logger.warn('[实时ASR] ASR 未激活，尝试建立连接...');
         try {
             await connectRealtimeAsr();
-            logger.info('[实时ASR] 连接已建立');
+            logger.info('[实时ASR] ASR 服务已就绪');
         } catch (err: any) {
             logger.error('建立 ASR 连接失败: %s', err.message);
             logger.error('请确保 ASR 连接在启动时已建立');
             return;
         }
+    }
+    
+    const ws = getGlobalWsConnection();
+    if (!ws || ws.readyState !== 1) {
+        logger.error('WebSocket 未连接，无法开始监听');
+        return;
     }
     
     isListening = true;
@@ -790,7 +715,8 @@ function stopListening(): void {
  * 通知server录音已开始
  */
 function notifyRecordingStarted() {
-    if (!realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+    const ws = getGlobalWsConnection();
+    if (!ws || ws.readyState !== 1) {
         logger.debug('[实时ASR] WebSocket未连接，无法通知录音开始');
         return;
     }
@@ -801,7 +727,7 @@ function notifyRecordingStarted() {
     };
     
     try {
-        realtimeAsrWs.send(JSON.stringify(notification));
+        publishEvent('client/asr/recording_started', [notification]);
         logger.debug('[实时ASR] 已通知server录音开始');
     } catch (err: any) {
         logger.error('[实时ASR] 通知录音开始失败: %s', err.message);
@@ -812,7 +738,8 @@ function notifyRecordingStarted() {
  * 通知server录音已完成，强制commit ASR识别
  */
 function notifyRecordingCompleted() {
-    if (!realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
+    const ws = getGlobalWsConnection();
+    if (!ws || ws.readyState !== 1) {
         logger.debug('[实时ASR] WebSocket未连接，无法通知录音完成');
         return;
     }
@@ -824,7 +751,7 @@ function notifyRecordingCompleted() {
     };
     
     try {
-        realtimeAsrWs.send(JSON.stringify(notification));
+        publishEvent('client/asr/recording_completed', [notification]);
         logger.debug('[实时ASR] 已通知server录音完成，强制commit');
     } catch (err: any) {
         logger.error('[实时ASR] 通知录音完成失败: %s', err.message);
@@ -882,10 +809,16 @@ async function sendCollectedAudio() {
     /* 以下代码已废弃，流式模式下不再需要
     try {
         // 确保实时 ASR 连接已建立
-        if (!isRealtimeAsrActive || !realtimeAsrWs || realtimeAsrWs.readyState !== WS.OPEN) {
-            logger.info('[实时ASR] 连接未就绪，正在建立连接...');
+        if (!isRealtimeAsrActive) {
+            logger.info('[实时ASR] ASR 未激活，正在建立连接...');
             await connectRealtimeAsr();
-            logger.info('[实时ASR] 连接已建立');
+            logger.info('[实时ASR] ASR 服务已就绪');
+        }
+        
+        const ws = getGlobalWsConnection();
+        if (!ws || ws.readyState !== 1) {
+            logger.error('WebSocket 未连接，无法开始监听');
+            return;
         }
 
         // 在开始发送新音频之前，清空之前的转录状态，确保不会使用上一次的结果
@@ -1360,13 +1293,8 @@ export async function apply(ctx: Context) {
         }
         stopAutoVoiceMonitoring();
         
-        // 关闭实时 ASR 连接
-        if (realtimeAsrWs && realtimeAsrWs.readyState === WS.OPEN) {
-            try {
-                realtimeAsrWs.close(1000, 'shutdown');
-            } catch { /* ignore */ }
-            realtimeAsrWs = null;
-        }
+        // 标记 ASR 为非激活状态（通过事件系统，不需要关闭连接）
+        isRealtimeAsrActive = false;
         
         // 停止键盘监听
         if (iohook) {
@@ -1378,6 +1306,9 @@ export async function apply(ctx: Context) {
                 }
                 if (iohook.checkInterval) {
                     clearInterval(iohook.checkInterval);
+                }
+                if (iohook.healthCheck) {
+                    clearInterval(iohook.healthCheck);
                 }
                 if (iohook.process) {
                     iohook.process.kill();

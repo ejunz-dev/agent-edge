@@ -282,33 +282,140 @@ function handleEventMessage(ws: any, msg: any) {
             break;
         }
         
+        // 新协议：等待 TTS 播放事件
+        case 'agent/wait_tts_playback': {
+            logger.debug('Agent 等待 TTS 播放（服务器通知客户端开始播放）');
+            // 事件会自动传播到其他监听器（如 ClientUIWebSocketHandler）
+            break;
+        }
+        
+        // 新协议：核心 message 事件（事件流队列）
+        case 'agent/message': {
+            const [message] = payload || [];
+            if (message) {
+                logger.debug('Agent Message: %s (type: %s)', message.messageId, message.type);
+                if (message.type === 'audio') {
+                    logger.debug('Audio Message - content: %s', message.content?.substring(0, 50) || 'N/A');
+                } else if (message.type === 'toolcall') {
+                    logger.debug('Toolcall Message - tool: %s', message.toolName || 'N/A');
+                }
+            }
+            // 事件会自动传播到其他监听器（如 ClientUIWebSocketHandler）
+            break;
+        }
+        
+        // 新协议：消息级别事件
+        case 'agent/message/start': {
+            logger.debug('Agent 消息开始（整个对话轮次开始）');
+            break;
+        }
+        
+        case 'agent/message/end': {
+            logger.debug('Agent 消息结束（整个对话轮次结束）');
+            break;
+        }
+        
+        // 新协议：内容输出阶段事件
+        case 'agent/content/start': {
+            logger.debug('Agent 内容输出开始（寒暄阶段开始）');
+            break;
+        }
+        
+        case 'client/agent/content_start':
+        case 'agent/content_start': {
+            // 向后兼容旧格式
+            logger.debug('Agent 开始输出内容（旧格式）');
+            break;
+        }
+        
+        case 'client/agent/content':
         case 'agent/content': {
             const [content] = payload || [];
             if (content) {
-                logger.debug('Agent 内容: %s', content);
+                logger.debug('Agent 内容流式输出: %s', content);
                 // 可以在这里处理流式内容
             }
             break;
         }
         
+        case 'agent/content/end': {
+            const [contentData] = payload || [];
+            const content = typeof contentData === 'string' ? contentData : contentData?.content;
+            logger.debug('Agent 内容输出结束（寒暄阶段结束）: %s', content?.substring(0, 50) || 'N/A');
+            break;
+        }
+        
+        case 'client/agent/content_complete':
+        case 'agent/content_complete': {
+            // 向后兼容旧格式
+            logger.debug('Agent 内容输出完成（旧格式）');
+            break;
+        }
+        
+        // 新协议：工具调用阶段事件
+        case 'agent/tool_call/start': {
+            const [toolData] = payload || [];
+            const toolName = typeof toolData === 'string' ? toolData : toolData?.toolName;
+            logger.debug('Agent 工具调用开始: %s', toolName || 'N/A');
+            break;
+        }
+        
+        case 'client/agent/tool_call_start':
+        case 'agent/tool_call_start': {
+            // 向后兼容旧格式
+            logger.debug('Agent 开始调用工具（旧格式）');
+            break;
+        }
+        
+        case 'client/agent/tool_call':
         case 'agent/tool_call': {
-            logger.debug('Agent 工具调用: %s', JSON.stringify(msg.tools || payload));
+            const [toolData] = payload || [];
+            const tools = toolData?.tools || (Array.isArray(toolData) ? toolData : []);
+            logger.debug('Agent 工具调用: %s', JSON.stringify(tools));
             break;
         }
         
+        case 'agent/tool_call/end': {
+            const [toolData] = payload || [];
+            const toolName = typeof toolData === 'string' ? toolData : toolData?.toolName;
+            logger.debug('Agent 工具调用结束: %s', toolName || 'N/A');
+            break;
+        }
+        
+        case 'client/agent/tool_call_complete':
+        case 'agent/tool_call_complete': {
+            // 向后兼容旧格式
+            logger.debug('Agent 工具调用完成（旧格式）');
+            break;
+        }
+        
+        case 'client/agent/tool_result':
         case 'agent/tool_result': {
-            logger.debug('Agent 工具结果: %s', JSON.stringify(msg));
+            const [resultData] = payload || [];
+            const tool = resultData?.tool || resultData?.toolName;
+            logger.debug('Agent 工具结果: %s - %s', tool || 'N/A', JSON.stringify(resultData?.result || resultData).substring(0, 100));
             break;
         }
         
+        case 'client/agent/thinking':
+        case 'agent/thinking': {
+            logger.debug('Agent 正在思考');
+            break;
+        }
+        
+        case 'client/agent/done':
         case 'agent/done': {
-            logger.info('Agent 对话完成: %s', msg.message || '');
+            const [doneData] = payload || [];
+            const message = typeof doneData === 'string' ? doneData : doneData?.message;
+            logger.info('Agent 对话完成: %s', message || '');
             break;
         }
         
+        case 'client/agent/error':
         case 'agent/error': {
-            const [error] = payload || [];
-            logger.error('Agent 错误: %s', error?.message || error);
+            const [errorData] = payload || [];
+            const error = typeof errorData === 'string' ? errorData : (errorData?.message || errorData);
+            logger.error('Agent 错误: %s', error);
             break;
         }
         
@@ -393,8 +500,23 @@ function handleLegacyMessage(ws: any, msg: any) {
             break;
         }
         
+        case 'agent/content_start': {
+            logger.debug('Agent 开始输出内容');
+            break;
+        }
+        
         case 'agent/content': {
             logger.debug('Agent 内容: %s', msg.content);
+            break;
+        }
+        
+        case 'agent/content_complete': {
+            logger.debug('Agent 内容输出完成');
+            break;
+        }
+        
+        case 'agent/tool_call_start': {
+            logger.debug('Agent 开始调用工具');
             break;
         }
         
@@ -403,8 +525,18 @@ function handleLegacyMessage(ws: any, msg: any) {
             break;
         }
         
+        case 'agent/tool_call_complete': {
+            logger.debug('Agent 工具调用完成');
+            break;
+        }
+        
         case 'agent/tool_result': {
             logger.debug('Agent 工具结果: %s', JSON.stringify(msg));
+            break;
+        }
+        
+        case 'agent/thinking': {
+            logger.debug('Agent 正在思考');
             break;
         }
         
@@ -536,11 +668,33 @@ export function startConnecting(ctx?: Context) {
                 'asr/error',
                 'tts/audio',
                 'tts/error',
+                // 新协议：核心事件
+                'agent/message',
+                'agent/message/start',
+                'agent/message/end',
+                'agent/wait_tts_playback',
+                // 新协议：内容输出阶段
+                'agent/content/start',
                 'agent/content',
+                'agent/content/end',
+                // 新协议：工具调用阶段
+                'agent/tool_call/start',
                 'agent/tool_call',
+                'agent/tool_call/end',
                 'agent/tool_result',
                 'agent/done',
                 'agent/error',
+                // 向后兼容旧格式
+                'client/agent/content_start',
+                'client/agent/content',
+                'client/agent/content_complete',
+                'client/agent/tool_call_start',
+                'client/agent/tool_call',
+                'client/agent/tool_call_complete',
+                'client/agent/tool_result',
+                'client/agent/thinking',
+                'client/agent/done',
+                'client/agent/error',
             ];
             
             // 延迟订阅，确保连接完全就绪

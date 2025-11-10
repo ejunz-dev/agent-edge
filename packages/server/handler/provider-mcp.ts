@@ -307,6 +307,159 @@ class ProviderLogsSSEHandler extends Handler<Context> {
     }
 }
 
+// 连接到上游 MCP endpoint（作为客户端）
+function setupProviderMCPClient(ctx: Context) {
+    const wsConfig = (config as any).ws || {};
+    const upstream = wsConfig.upstream;
+    const enabled = wsConfig.enabled !== false;
+
+    if (!enabled || !upstream) {
+        logger.info('Provider MCP 客户端未启用或未配置 upstream');
+        return () => {};
+    }
+
+    // 检查 upstream 是否是完整的 WebSocket URL
+    if (!upstream.startsWith('ws://') && !upstream.startsWith('wss://')) {
+        logger.warn('Provider MCP upstream 必须是完整的 WebSocket URL (ws:// 或 wss://)');
+        return () => {};
+    }
+
+    let WS: any;
+    try {
+        WS = require('ws');
+    } catch (e) {
+        logger.error('缺少 ws 依赖，请安装: npm install ws');
+        return () => {};
+    }
+
+    let ws: any = null;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let retryDelay = 5000;
+    let stopped = false;
+
+    const scheduleReconnect = () => {
+        if (stopped) return;
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+        }, retryDelay);
+        logger.info('将在 %d 秒后重试连接 MCP upstream', Math.round(retryDelay / 1000));
+        retryDelay = Math.min(retryDelay * 1.5, 30000);
+    };
+
+    const connect = () => {
+        if (stopped) return;
+        if (ws && (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING)) return;
+
+        logger.info('连接到 MCP upstream: %s', upstream);
+        ws = new WS(upstream, { perMessageDeflate: false });
+
+        ws.on('open', () => {
+            logger.success('已连接到 MCP upstream: %s', upstream);
+            retryDelay = 5000;
+            
+            // 发送初始化消息
+            try {
+                ws.send(JSON.stringify({
+                    jsonrpc: '2.0',
+                    method: 'initialize',
+                    params: {},
+                    id: 1,
+                }));
+            } catch (e) {
+                logger.warn('发送初始化消息失败: %s', (e as Error).message);
+            }
+        });
+
+        ws.on('message', async (data: any) => {
+            try {
+                const text = typeof data === 'string' ? data : data.toString('utf8');
+                const message = JSON.parse(text);
+                
+                // 处理 tools/list 请求
+                if (message.method === 'tools/list' || (message.params && message.params.method === 'tools/list')) {
+                    const tools = listTools();
+                    try {
+                        ws.send(JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: message.id,
+                            result: { tools },
+                        }));
+                    } catch (e) {
+                        logger.warn('发送工具列表失败: %s', (e as Error).message);
+                    }
+                    return;
+                }
+
+                // 处理 tools/call 请求
+                if (message.method === 'tools/call' || (message.params && message.params.method === 'tools/call')) {
+                    const { name, arguments: args } = message.params || {};
+                    const startTime = Date.now();
+                    
+                    try {
+                        const result = await callTool(ctx, { name, arguments: args });
+                        
+                        // 记录日志
+                        try {
+                            const log = await ctx.db.mcplog.insert({
+                                timestamp: Date.now(),
+                                level: 'info',
+                                message: `Tool called: ${name}`,
+                                tool: name,
+                                metadata: { args, result, duration: Date.now() - startTime },
+                            });
+                            try { await (ctx as any).emit('mcp/log', log); } catch {}
+                        } catch {}
+                        
+                        ws.send(JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: message.id,
+                            result,
+                        }));
+                    } catch (e) {
+                        logger.error('工具调用失败: %s', (e as Error).message);
+                        ws.send(JSON.stringify({
+                            jsonrpc: '2.0',
+                            id: message.id,
+                            error: { code: -32603, message: (e as Error).message },
+                        }));
+                    }
+                    return;
+                }
+
+                logger.debug('收到 MCP 消息: %o', message);
+            } catch (e) {
+                logger.warn('处理 MCP 消息失败: %s', (e as Error).message);
+            }
+        });
+
+        ws.on('close', (code: number, reason: Buffer) => {
+            logger.warn('MCP upstream 连接已关闭 (%s): %s', code, reason?.toString?.() || '');
+            ws = null;
+            if (!stopped) scheduleReconnect();
+        });
+
+        ws.on('error', (err: Error) => {
+            logger.error('MCP upstream 连接错误: %s', err.message);
+        });
+    };
+
+    connect();
+
+    return () => {
+        stopped = true;
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        if (ws) {
+            try { ws.close(); } catch {}
+            ws = null;
+        }
+    };
+}
+
 export async function apply(ctx: Context) {
     // HTTP MCP API (internal)
     ctx.Route('provider_mcp_api', '/mcp/api', ProviderMCPApiHandler);
@@ -317,11 +470,18 @@ export async function apply(ctx: Context) {
     // SSE Logs (for real-time log monitoring)
     ctx.Route('provider_logs_sse', '/api/logs/sse', ProviderLogsSSEHandler);
     
-    // WebSocket MCP Handler（如果启用）
+    // WebSocket MCP Handler（作为服务器端，如果启用）
     if (config.ws?.enabled !== false) {
         const endpoint = config.ws?.endpoint || '/mcp/ws';
         ctx.Connection('provider_mcp_ws', endpoint, ProviderMCPWebSocketHandler);
-        logger.info(`MCP WebSocket endpoint: ${endpoint}`);
+        logger.info(`MCP WebSocket endpoint (server): ${endpoint}`);
+    }
+    
+    // 连接到上游 MCP endpoint（作为客户端）
+    const dispose = setupProviderMCPClient(ctx);
+    if (dispose) {
+        // 在服务停止时清理连接
+        ctx.on('dispose' as any, dispose);
     }
 }
 

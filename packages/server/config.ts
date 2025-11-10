@@ -72,6 +72,11 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 port: 5284
 # 上游服务器WebSocket连接地址（用于主动连接上游服务器）
 upstream: 'ws://localhost:5283' # 例如 'ws://192.168.1.10:5283' 或 'wss://example.com'
+# 对外暴露的地址和端口（可选，如果服务器需要回连本节点）
+publicHost: '' # 例如 '192.168.1.20'，留空则自动使用主机名
+publicPort: 0 # 0 表示使用 port 配置
+# 自定义节点 ID（可选，留空则使用主机名或 MQTT 用户名）
+nodeId: ''
 # 上游MQTT Broker配置（不是本项目的server）
 mqtt:
   mqttUrl: 'mqtt://localhost:1883' # 上游MQTT Broker地址
@@ -86,6 +91,11 @@ zigbee2mqtt:
   password: ''
   autoStart: true # node 启动时自动拉起 zigbee2mqtt 进程
   adapter: '/dev/ttyUSB0'
+# MCP Provider 配置（与 provider 模式相同，用于向上游提供 MCP 工具）
+ws:
+  endpoint: '' # 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws?token=xxx)
+  localEndpoint: '/mcp/ws' # 本地 WebSocket 服务器路径
+  enabled: true
 `;
         const clientConfigDefault = yaml.dump({
             server: '',
@@ -95,7 +105,8 @@ zigbee2mqtt:
 port: 5285
 # WebSocket 接入点配置
 ws:
-  endpoint: '/mcp/ws' # WebSocket 路径
+  endpoint: '/mcp/ws' # 本地 WebSocket 服务器路径
+  upstream: '' # 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws?token=xxx)
   enabled: true
 # MCP 工具配置
 tools:
@@ -300,8 +311,11 @@ const clientSchema = Schema.object({
 });
 
 const nodeSchema = Schema.object({
+    nodeId: Schema.string().default(''),
     port: Schema.number().default(5283),
     upstream: Schema.string().default('ws://localhost:5283'), // 上游服务器WebSocket连接地址
+    publicHost: Schema.string().default(''),
+    publicPort: Schema.number().default(0),
     mqtt: Schema.object({
         mqttUrl: Schema.string().default('mqtt://localhost:1883'),
         baseTopic: Schema.string().default('zigbee2mqtt'),
@@ -368,15 +382,27 @@ const nodeSchema = Schema.object({
         autoStart: true,
         adapter: '/dev/ttyUSB0',
     }),
+    // MCP Provider 配置（与 provider 模式相同）
+    ws: Schema.object({
+        endpoint: Schema.string().default(''), // 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws)
+        localEndpoint: Schema.string().default('/mcp/ws'), // 本地 WebSocket 服务器路径
+        enabled: Schema.boolean().default(true),
+    }).default({
+        endpoint: '',
+        localEndpoint: '/mcp/ws',
+        enabled: true,
+    }),
 }).description('Node Config');
 
 const providerSchema = Schema.object({
     port: Schema.number().default(5285),
     ws: Schema.object({
-        endpoint: Schema.string().default('/mcp/ws'),
+        endpoint: Schema.string().default('/mcp/ws'), // 本地 WebSocket 服务器路径
+        upstream: Schema.string().default(''), // 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws?token=xxx)
         enabled: Schema.boolean().default(true),
     }).default({
         endpoint: '/mcp/ws',
+        upstream: '',
         enabled: true,
     }),
     tools: Schema.object({

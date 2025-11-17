@@ -4,22 +4,123 @@ import os from 'node:os';
 import { Context } from 'cordis';
 import { Logger } from '@ejunz/utils';
 import { config } from '../config';
-import { listNodeTools, setDynamicNodeTools, NodeToolRegistryEntry, NodeToolDefinition } from '../mcp-tools/node';
+import { listNodeTools, setDynamicNodeTools, NodeToolRegistryEntry, NodeToolDefinition, callNodeTool } from '../mcp-tools/node';
 import { callZigbeeControlTool } from '../mcp-tools/nodeZigbee';
 
 const logger = new Logger('node-client');
 
-// 连接到本地MQTT Broker（用于zigbee2mqtt控制）
+type EdgeEnvelope = {
+    protocol: string;
+    action: string;
+    channel?: string;
+    payload?: any;
+    nodeId?: string | number;
+    domainId?: string;
+    traceId?: string;
+    token?: string;
+    qos?: 0 | 1 | 2;
+    direction?: 'inbound' | 'outbound';
+    meta?: Record<string, any>;
+};
+
+type ToolUpdateListener = (tools: NodeToolDefinition[]) => void;
+
+interface EdgeBridgeHandle {
+    send: (envelope: EdgeEnvelope) => void;
+    dispose: () => void;
+}
+
+const EDGE_EVENT_INBOUND = 'edge/ws/inbound';
+const EDGE_EVENT_OUTBOUND = 'edge/ws/outbound';
+
+let cachedNodeId: string | null = null;
+let edgeBridgeHandle: EdgeBridgeHandle | null = null;
+const toolUpdateListeners = new Set<ToolUpdateListener>();
+let cachedAdvertisedTools: NodeToolDefinition[] = [];
+// 防重复处理：记录最近处理的命令（基于 traceId 或 channel+payload）
+const processedCommands = new Map<string, number>();
+
+function getResolvedNodeId(): string {
+    if (!cachedNodeId) cachedNodeId = resolveNodeId();
+    return cachedNodeId;
+}
+
+function generateTraceId(prefix = 'edge'): string {
+    return `${prefix}-${getResolvedNodeId()}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+}
+
+function emitEdgeEvent(ctx: Context | undefined, direction: 'inbound' | 'outbound', envelope: EdgeEnvelope) {
+    if (!ctx || typeof ctx.parallel !== 'function') return;
+    const eventName = direction === 'inbound' ? EDGE_EVENT_INBOUND : EDGE_EVENT_OUTBOUND;
+    try {
+        ctx.parallel(eventName, envelope);
+    } catch (e) {
+        logger.debug?.('emitEdgeEvent failed: %s', (e as Error).message);
+    }
+}
+
+function prepareEnvelopeForSend(envelope: EdgeEnvelope, direction: 'outbound' | 'inbound' = 'outbound'): EdgeEnvelope {
+    const prepared: EdgeEnvelope = {
+        traceId: envelope.traceId || generateTraceId(envelope.protocol || 'edge'),
+        ...envelope,
+        direction,
+    };
+    // 不再自动添加 nodeId，由上游从 token 或其他方式识别
+    prepared.meta = prepared.meta || {};
+    return prepared;
+}
+
+function sendEdgeEnvelope(envelope: EdgeEnvelope) {
+    if (!edgeBridgeHandle) {
+        logger.debug?.('Edge WS bridge not ready, drop envelope: %s/%s', envelope.protocol, envelope.action);
+        return;
+    }
+    edgeBridgeHandle.send(envelope);
+}
+
+function notifyNodeToolsUpdated(tools: NodeToolDefinition[]) {
+    cachedAdvertisedTools = tools;
+    for (const listener of toolUpdateListeners) {
+        try {
+            listener(tools);
+        } catch (e) {
+            logger.warn('tools listener failed: %s', (e as Error).message);
+        }
+    }
+}
+
+function onNodeToolsUpdated(listener: ToolUpdateListener): () => void {
+    toolUpdateListeners.add(listener);
+    if (cachedAdvertisedTools.length) {
+        try { listener(cachedAdvertisedTools); } catch {}
+    }
+    return () => {
+        toolUpdateListeners.delete(listener);
+    };
+}
+
+function getAdvertisedToolsSnapshot(): NodeToolDefinition[] {
+    if (cachedAdvertisedTools.length) return cachedAdvertisedTools;
+    const nodeId = getResolvedNodeId();
+    const advertiseHost = resolveAdvertisedHost();
+    const advertisePort = resolveAdvertisedPort();
+    cachedAdvertisedTools = decorateToolsForAdvertise(
+        listNodeTools(true) as NodeToolDefinition[],
+        nodeId,
+        advertiseHost,
+        advertisePort,
+    );
+    return cachedAdvertisedTools;
+}
+
+// 连接到本地MQTT Broker（用于zigbee2mqtt控制，默认 localhost:1883）
 function connectToLocalMqttBroker(ctx?: Context) {
     if (!ctx) return;
     
-    // 使用zigbee2mqtt配置连接到本地broker
+    // 使用本地broker（默认 localhost:1883，无需配置）
+    const mqttUrl = 'mqtt://localhost:1883';
     const z2mConfig = (config as any).zigbee2mqtt || {};
-    
-    const mqttUrl = z2mConfig.mqttUrl || 'mqtt://localhost:1883';
     const baseTopic = z2mConfig.baseTopic || 'zigbee2mqtt';
-    const username = z2mConfig.username || '';
-    const password = z2mConfig.password || '';
     
     logger.info('连接到本地MQTT Broker: %s', mqttUrl);
     
@@ -29,8 +130,6 @@ function connectToLocalMqttBroker(ctx?: Context) {
             if (z2mSvc && typeof z2mSvc.connectToBroker === 'function') {
                 await z2mSvc.connectToBroker(mqttUrl, {
                     baseTopic,
-                    username,
-                    password,
                 });
                 logger.info('已连接到本地MQTT Broker: %s', mqttUrl);
             }
@@ -40,210 +139,7 @@ function connectToLocalMqttBroker(ctx?: Context) {
     }
 }
 
-// 连接到远程MQTT Broker（用于与上游服务器通信）
-function connectToRemoteMqttBroker(ctx?: Context) {
-    if (!ctx) return;
-    
-    const mqttConfig = (config as any).mqtt || {};
-    const mqttUrl = mqttConfig.mqttUrl || '';
-    
-    if (!mqttUrl) {
-        logger.info('未配置远程MQTT Broker，跳过连接');
-        return;
-    }
-    
-    const baseTopic = mqttConfig.baseTopic || 'zigbee2mqtt';
-    const username = mqttConfig.username || '';
-    const password = mqttConfig.password || '';
-    
-    logger.info('连接到远程MQTT Broker: %s (用户名: %s)', mqttUrl, username || '无');
-    
-    try {
-        let mqtt: any;
-        try {
-            mqtt = require('mqtt');
-        } catch (e) {
-            logger.error('mqtt 依赖缺失，请安装依赖 "mqtt" 后重试');
-            return;
-        }
-        
-        // 从用户名中提取domainId和nodeId（格式: domainId:nodeId）
-        let domainId = 'system';
-        let nodeId = '1';
-        if (username && username.includes(':')) {
-            const parts = username.split(':');
-            domainId = parts[0] || 'system';
-            nodeId = parts[1] || '1';
-        }
-        
-        // 使用示例代码中的客户端ID格式
-        const clientId = `node_${domainId}_${nodeId}_${Date.now()}`;
-        
-        // MQTT连接选项
-        const connectOptions: any = {
-            clientId,
-            username: username || undefined,
-            password: password || undefined,
-            keepalive: 60, // 保持连接，60秒
-            connectTimeout: 30000, // 连接超时30秒
-            reconnectPeriod: 5000, // 重连间隔5秒（自动重连）
-            clean: true, // 清理会话
-            // 确保主动连接，不等待
-            connectOnCreate: true, // 立即尝试连接
-        };
-        
-        // 如果是WebSocket连接，需要特殊配置
-        if (mqttUrl.startsWith('ws://') || mqttUrl.startsWith('wss://')) {
-            // 对于WebSocket连接，mqtt.js需要明确的协议标识
-            connectOptions.protocol = mqttUrl.startsWith('wss://') ? 'wss' : 'ws';
-            // WebSocket连接需要更长的超时时间
-            connectOptions.connectTimeout = 60000; // WebSocket连接超时60秒
-            // WebSocket特定选项
-            connectOptions.wsOptions = {
-                handshakeTimeout: 30000, // WebSocket握手超时
-                perMessageDeflate: false, // 禁用压缩
-            };
-            // 确保使用MQTT协议（不是其他协议）
-            connectOptions.protocolId = 'MQTT';
-            connectOptions.protocolVersion = 4; // MQTT 3.1.1
-        }
-        
-        logger.info('MQTT连接选项: clientId=%s, keepalive=%d, timeout=%dms, protocol=%s, reconnectPeriod=%dms, username=%s', 
-            clientId, connectOptions.keepalive, connectOptions.connectTimeout, 
-            connectOptions.protocol || 'mqtt', connectOptions.reconnectPeriod, username || '无');
-        
-        logger.info('正在主动建立MQTT连接... (URL: %s)', mqttUrl);
-        const client = mqtt.connect(mqttUrl, connectOptions);
-        
-        // 确认连接已开始尝试
-        logger.debug('MQTT客户端已创建，连接状态: %s', client.connected ? '已连接' : '连接中...');
-        
-        // 添加连接状态监控
-        let connectStartTime = Date.now();
-        const connectionTimeout = setTimeout(() => {
-            const elapsed = Date.now() - connectStartTime;
-            if (!client.connected) {
-                logger.warn('MQTT连接已等待 %d 秒，仍在尝试连接...', Math.round(elapsed / 1000));
-            }
-        }, 10000); // 10秒后提示
-        
-        client.on('connect', async (connack: any) => {
-            clearTimeout(connectionTimeout);
-            const elapsed = Date.now() - connectStartTime;
-            logger.success('已连接到远程MQTT Broker: %s (clientId: %s, 耗时: %dms)', 
-                mqttUrl, clientId, elapsed);
-            if (connack) {
-                logger.debug('CONNACK: returnCode=%d, sessionPresent=%s', 
-                    connack.returnCode !== undefined ? connack.returnCode : connack, 
-                    connack.sessionPresent || false);
-            }
-            
-            // 订阅设备控制指令
-            const controlTopic = 'devices/+/set';
-            client.subscribe(controlTopic, (err) => {
-                if (err) {
-                    logger.error('订阅控制指令失败: %s', err.message);
-                } else {
-                    logger.info('已订阅控制指令: %s', controlTopic);
-                }
-            });
-            
-            // 发送设备发现消息
-            if (ctx) {
-                try {
-                    await sendDeviceDiscovery(ctx, client, parseInt(nodeId, 10));
-                } catch (e) {
-                    logger.error('发送设备发现消息失败: %s', (e as Error).message);
-                }
-            }
-        });
-        
-        // 接收控制指令
-        client.on('message', async (topic: string, message: Buffer) => {
-            if (topic.includes('/set')) {
-                try {
-                    const deviceId = topic.split('/')[1]; // 从 topic 中提取 deviceId
-                    const command = JSON.parse(message.toString());
-                    logger.info('收到控制指令: %s, 命令: %o', deviceId, command);
-                    
-                    // 执行控制指令
-                    if (ctx) {
-                        await executeDeviceControl(ctx, deviceId, command);
-                        
-                        // 更新设备状态
-                        await updateDeviceState(ctx, client, parseInt(nodeId, 10), deviceId, command);
-                    }
-                } catch (e) {
-                    logger.error('处理控制指令失败: %s', (e as Error).message);
-                }
-            }
-        });
-        
-        client.on('error', (err: Error) => {
-            clearTimeout(connectionTimeout);
-            logger.error('远程MQTT Broker连接错误: %s', err.message);
-            if (err.stack) {
-                logger.debug('错误堆栈: %s', err.stack);
-            }
-            // 检查是否是网络相关错误
-            if (err.message.includes('ENOTFOUND') || err.message.includes('ECONNREFUSED')) {
-                logger.error('网络连接失败，请检查：');
-                logger.error('  1. 服务器地址是否正确: %s', mqttUrl);
-                logger.error('  2. 网络是否可达');
-                logger.error('  3. 防火墙是否阻止连接');
-            }
-            // connack timeout 特定错误
-            if (err.message.includes('connack timeout')) {
-                logger.error('MQTT CONNACK 超时，可能的原因：');
-                logger.error('  1. 认证信息错误（用户名/密码: %s/%s）', username || '无', password ? '***' : '无');
-                logger.error('  2. 服务器不支持该客户端ID格式: %s', clientId);
-                logger.error('  3. WebSocket子协议不匹配');
-                logger.error('  4. 服务器端MQTT协议版本不匹配');
-            }
-        });
-        
-        client.on('close', () => {
-            clearTimeout(connectionTimeout);
-            logger.warn('远程MQTT Broker连接已关闭');
-        });
-        
-        client.on('reconnect', () => {
-            const elapsed = Date.now() - connectStartTime;
-            logger.info('正在主动重连远程MQTT Broker... (clientId: %s, 已等待: %ds)', 
-                clientId, Math.round(elapsed / 1000));
-            connectStartTime = Date.now(); // 重置计时
-        });
-        
-        client.on('offline', () => {
-            logger.warn('远程MQTT Broker已离线');
-        });
-        
-        // 添加end事件监听
-        client.on('end', () => {
-            logger.info('远程MQTT Broker连接已结束');
-        });
-        
-        // 监听zigbee2mqtt设备状态变化并自动发送更新
-        if (ctx) {
-            setupDeviceStateListener(ctx, client, parseInt(nodeId, 10));
-        }
-        
-        // 使用ctx的私有存储来保存客户端引用（如果支持）
-        // 注意：不直接设置ctx属性，避免错误
-        try {
-            if (ctx && typeof (ctx as any).set === 'function') {
-                (ctx as any).set('remoteMqttClient', client);
-            }
-        } catch (e) {
-            // 如果无法存储，至少连接已建立
-            logger.debug('无法存储远程MQTT客户端引用: %s', (e as Error).message);
-        }
-        
-    } catch (e) {
-        logger.error('连接远程MQTT Broker失败: %s', (e as Error).message);
-        logger.debug('错误堆栈: %s', (e as Error).stack);
-    }
-}
+// 注意：远程MQTT Broker连接已移除，所有通信通过Edge WebSocket进行
 
 // 发送设备发现消息
 async function sendDeviceDiscovery(ctx: Context, client: any, nodeId: number) {
@@ -346,44 +242,418 @@ async function updateDeviceState(ctx: Context, client: any, nodeId: number, devi
     }
 }
 
-// 设置设备状态监听器，监听zigbee2mqtt设备状态变化并自动发送更新
-function setupDeviceStateListener(ctx: Context, client: any, nodeId: number) {
+// 设置设备状态监听器，监听 zigbee2mqtt 设备状态并通过 Edge WS 上报
+function setupDeviceStateListener(ctx?: Context) {
+    if (!ctx) return () => {};
+    const nodeId = getResolvedNodeId();
+    const baseTopic = ((config as any).zigbee2mqtt?.baseTopic || 'zigbee2mqtt').replace(/\/+$/, '');
+
+    const forwardState = (deviceId: string, state: any) => {
+        if (!deviceId) return;
+        const normalizedState = state ?? {};
+        sendEdgeEnvelope({
+            protocol: 'mqtt',
+            action: 'publish',
+            channel: `node/${nodeId}/devices/${deviceId}/state`,
+            payload: normalizedState,
+        });
+        sendEdgeEnvelope({
+            protocol: 'mqtt',
+            action: 'publish',
+            channel: `${baseTopic}/${deviceId}`,
+            payload: normalizedState,
+            meta: { mirrored: true },
+        });
+    };
+
+    const dispose = ctx.on?.('zigbee2mqtt/deviceState' as any, (deviceId: string, state: any) => {
+        forwardState(deviceId, state);
+    });
+
+    logger.info('已设置 Zigbee 设备状态上报监听');
+
+    return typeof dispose === 'function' ? dispose : () => {};
+}
+
+function resolveEdgeEndpoint(): string {
+    const wsConfig = (config as any).ws || {};
+    const explicit = (wsConfig.endpoint || '').trim();
+    if (explicit) return explicit;
+    // 不再支持 upstream 配置，必须使用 ws.endpoint
+    logger.warn('未配置 ws.endpoint，请设置 Edge WebSocket endpoint');
+    return '';
+}
+
+function extractDeviceIdFromChannel(channel: string): string | null {
+    if (!channel) return null;
+    const normalized = channel.replace(/^\/+|\/+$/g, '');
+    
+    // 匹配 node/<任意nodeId>/devices/<deviceId>/set 或 node/<任意nodeId>/devices/<deviceId>
+    const nodeDevicesMatch = normalized.match(/^node\/[^/]+\/devices\/([^/]+)(?:\/set)?$/);
+    if (nodeDevicesMatch) {
+        return nodeDevicesMatch[1] || null;
+    }
+    
+    // 匹配 zigbee2mqtt/<deviceId>/set 或 zigbee2mqtt/<deviceId>
+    const baseTopic = ((config as any).zigbee2mqtt?.baseTopic || 'zigbee2mqtt').replace(/\/+$/, '');
+    if (normalized.startsWith(`${baseTopic}/`)) {
+        const rest = normalized.slice(baseTopic.length + 1);
+        const [deviceId] = rest.split('/');
+        // 排除 bridge 相关的 topic
+        if (deviceId && deviceId !== 'bridge') {
+            return deviceId || null;
+        }
+    }
+    
+    return null;
+}
+
+async function handleInboundMqttEnvelope(ctx: Context | undefined, envelope: EdgeEnvelope) {
+    if (!ctx) return;
+    if (envelope.action !== 'publish') return;
+    const channel = envelope.channel || '';
+    const deviceId = extractDeviceIdFromChannel(channel);
+    if (!deviceId) {
+        logger.debug?.('无法解析 MQTT channel: %s', channel);
+        return;
+    }
+    let payload = envelope.payload;
+    if (typeof payload === 'string') {
+        try { payload = JSON.parse(payload); } catch {
+            payload = { value: payload };
+        }
+    }
+    if (payload === undefined || payload === null) payload = {};
+
+    // 命令格式转换：将 on: true/false 转换为 state: "ON"/"OFF"
+    if (typeof payload.on === 'boolean' && payload.state === undefined) {
+        const onValue = payload.on;
+        payload.state = onValue ? 'ON' : 'OFF';
+        delete payload.on;
+        logger.debug?.('命令格式转换: on=%s -> state=%s', onValue ? 'true' : 'false', payload.state);
+    }
+
+    // 防重复处理：检查是否在最近 2 秒内处理过相同的命令
+    const commandKey = envelope.traceId || `${channel}:${JSON.stringify(payload)}`;
+    const now = Date.now();
+    const lastProcessed = processedCommands.get(commandKey);
+    if (lastProcessed && (now - lastProcessed) < 2000) {
+        logger.debug?.('跳过重复命令: %s (距离上次处理 %dms)', commandKey, now - lastProcessed);
+        return;
+    }
+    processedCommands.set(commandKey, now);
+    
+    // 清理过期的记录（超过 10 秒）
+    for (const [key, timestamp] of processedCommands.entries()) {
+        if (now - timestamp > 10000) {
+            processedCommands.delete(key);
+        }
+    }
+
     try {
-        ctx.inject(['zigbee2mqtt'], async (c) => {
-            const z2mSvc = c.zigbee2mqtt;
-            if (!z2mSvc || !z2mSvc.client) {
-                logger.warn('Zigbee2MQTT 服务未初始化，无法设置设备状态监听');
-                return;
-            }
-            
-            // 监听本地MQTT消息，当设备状态变化时自动发送到上游
-            z2mSvc.client.on('message', (topic: string, payload: Buffer) => {
-                // 监听设备状态更新（格式: zigbee2mqtt/{deviceId}）
-                if (topic.startsWith(z2mSvc.baseTopic + '/') && !topic.includes('/bridge/')) {
-                    const deviceId = topic.substring(z2mSvc.baseTopic.length + 1);
-                    try {
-                        const state = JSON.parse(payload.toString());
-                        const stateTopic = `node/${nodeId}/devices/${deviceId}/state`;
-                        const statePayload = JSON.stringify(state);
-                        
-                        client.publish(stateTopic, statePayload, (err: Error | null) => {
-                            if (err) {
-                                logger.debug('自动发送状态更新失败: %s', err.message);
-                            } else {
-                                logger.debug('自动发送状态更新: %s -> %s', deviceId, stateTopic);
-                            }
-                        });
-                    } catch (e) {
-                        // 忽略解析错误
-                    }
-                }
-            });
-            
-            logger.info('已设置设备状态自动更新监听器');
+        await executeDeviceControl(ctx, deviceId, payload);
+        sendEdgeEnvelope({
+            protocol: 'mqtt',
+            action: 'publish',
+            channel: `node/${getResolvedNodeId()}/devices/${deviceId}/ack`,
+            payload: { ok: 1, timestamp: Date.now(), channel },
+            traceId: envelope.traceId,
+            meta: { source: 'node', type: 'ack' },
         });
     } catch (e) {
-        logger.warn('设置设备状态监听器失败: %s', (e as Error).message);
+        sendEdgeEnvelope({
+            protocol: 'mqtt',
+            action: 'error',
+            channel,
+            payload: { message: (e as Error).message, deviceId },
+            traceId: envelope.traceId,
+        });
     }
+}
+
+async function handleInboundMcpEnvelope(ctx: Context | undefined, envelope: EdgeEnvelope) {
+    if (!ctx) return;
+    const payload = envelope.payload || {};
+    if (typeof payload !== 'object') return;
+    const id = payload.id ?? null;
+    const method = payload.method;
+    const reply = (body: any) => {
+        sendEdgeEnvelope({
+            protocol: 'mcp',
+            action: 'jsonrpc',
+            traceId: envelope.traceId,
+            payload: {
+                jsonrpc: '2.0',
+                id,
+                ...body,
+            },
+        });
+    };
+
+    if (!method) {
+        logger.debug?.('收到 MCP 响应: %o', payload);
+        return;
+    }
+
+    try {
+        if (method === 'initialize') {
+            reply({
+                result: {
+                    protocolVersion: '2024-11-05',
+                    capabilities: { tools: {}, resources: {} },
+                    serverInfo: { name: `agent-edge-node-${getResolvedNodeId()}`, version: '1.0.0' },
+                },
+            });
+            return;
+        }
+
+        if (method === 'tools/list') {
+            reply({ result: { tools: getAdvertisedToolsSnapshot() } });
+            return;
+        }
+
+        if (method === 'tools/call') {
+            const { name, arguments: args } = payload.params || {};
+            const result = await callNodeTool(ctx, { name, arguments: args });
+            reply({ result });
+            return;
+        }
+
+        if (method === 'notifications/refresh-tools') {
+            reply({ result: { ok: 1 } });
+            return;
+        }
+
+        reply({ error: { code: -32601, message: `Unknown MCP method: ${method}` } });
+    } catch (e) {
+        reply({ error: { code: -32603, message: (e as Error).message } });
+    }
+}
+
+function startEdgeEnvelopeBridge(ctx?: Context) {
+    if (!ctx) return () => {};
+    const endpoint = resolveEdgeEndpoint();
+    if (!endpoint) {
+        logger.warn('未配置 ws.endpoint，跳过 Edge WS 信道');
+        return () => {};
+    }
+
+    let WS: any;
+    try {
+        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+        WS = require('ws');
+    } catch (e) {
+        logger.error('缺少 ws 依赖，请先安装：yarn add -W ws');
+        return () => {};
+    }
+
+    let ws: any = null;
+    let stopped = false;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let retryDelay = 5000;
+    let heartbeatInterval: NodeJS.Timeout | null = null;
+    const queue: EdgeEnvelope[] = [];
+    const maxQueueSize = 200;
+    const listeners: Array<() => void> = [];
+
+    const flushQueue = () => {
+        if (!ws || ws.readyState !== WS.OPEN) return;
+        while (queue.length) {
+            const item = queue.shift();
+            if (!item) break;
+            try {
+                ws.send(JSON.stringify(item));
+                emitEdgeEvent(ctx, 'outbound', item);
+            } catch (e) {
+                queue.unshift(item);
+                logger.warn('发送队列消息失败: %s', (e as Error).message);
+                break;
+            }
+        }
+    };
+
+    const enqueueEnvelope = (envelope: EdgeEnvelope) => {
+        const prepared = prepareEnvelopeForSend(envelope, 'outbound');
+        if (ws && ws.readyState === WS.OPEN) {
+            try {
+                ws.send(JSON.stringify(prepared));
+                emitEdgeEvent(ctx, 'outbound', prepared);
+                return;
+            } catch (e) {
+                logger.warn('发送 Envelope 失败，将进入队列: %s', (e as Error).message);
+            }
+        }
+        queue.push(prepared);
+        if (queue.length > maxQueueSize) queue.shift();
+    };
+
+    const sendHandshake = () => {
+        enqueueEnvelope({
+            protocol: 'mcp',
+            action: 'jsonrpc',
+            payload: {
+                jsonrpc: '2.0',
+                method: 'notifications/initialized',
+                params: {
+                    host: resolveAdvertisedHost(),
+                    port: resolveAdvertisedPort(),
+                    toolsHash: computeToolsSignature(getAdvertisedToolsSnapshot()),
+                    timestamp: Date.now(),
+                },
+                id: generateTraceId('init'),
+            },
+        });
+    };
+
+    const sendToolsNotification = (reason: string, tools?: NodeToolDefinition[]) => {
+        const payloadTools = tools || getAdvertisedToolsSnapshot();
+        enqueueEnvelope({
+            protocol: 'mcp',
+            action: 'jsonrpc',
+            payload: {
+                jsonrpc: '2.0',
+                method: 'notifications/tools-update',
+                params: {
+                    tools: payloadTools,
+                    reason,
+                    timestamp: Date.now(),
+                },
+                id: generateTraceId('tools'),
+            },
+            meta: { reason },
+        });
+    };
+
+    const handleInboundMessage = async (data: any) => {
+        let text: string;
+        if (typeof data === 'string') text = data;
+        else if (Buffer.isBuffer(data)) text = data.toString('utf8');
+        else text = String(data);
+        let parsed: any;
+        try {
+            parsed = JSON.parse(text);
+        } catch (e) {
+            logger.warn('Edge WS 收到非法 JSON: %s', (e as Error).message);
+            return;
+        }
+        let envelope: EdgeEnvelope;
+        if (parsed.protocol) envelope = parsed;
+        else if (parsed.jsonrpc) {
+            envelope = { protocol: 'mcp', action: 'jsonrpc', payload: parsed };
+        } else {
+            logger.debug?.('忽略未知消息: %s', text);
+            return;
+        }
+        envelope.direction = 'inbound';
+        // 不再自动设置 nodeId，由上游从 token 或其他方式识别
+        emitEdgeEvent(ctx, 'inbound', envelope);
+        if (envelope.protocol === 'mqtt') {
+            await handleInboundMqttEnvelope(ctx, envelope);
+        } else if (envelope.protocol === 'mcp') {
+            await handleInboundMcpEnvelope(ctx, envelope);
+        } else {
+            logger.debug?.('未知协议 Envelope: %s', envelope.protocol);
+        }
+    };
+
+    const stopHeartbeat = () => {
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        }
+    };
+
+    const startHeartbeat = () => {
+        if (heartbeatInterval) return;
+        heartbeatInterval = setInterval(() => {
+            if (ws && ws.readyState === WS.OPEN) {
+                try { ws.ping?.(); } catch {}
+            }
+        }, 30000);
+    };
+
+    const scheduleReconnect = () => {
+        if (stopped) return;
+        if (reconnectTimer) return;
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+        }, retryDelay);
+        logger.info('Edge WS 将在 %d 秒后尝试重连', Math.round(retryDelay / 1000));
+        retryDelay = Math.min(retryDelay * 1.5, 30000);
+    };
+
+    const connect = () => {
+        if (stopped) return;
+        if (ws && (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING)) return;
+        logger.info('尝试连接 Edge WS: %s', endpoint);
+        try {
+            ws = new WS(endpoint, { perMessageDeflate: false, handshakeTimeout: 20000 });
+        } catch (e) {
+            logger.error('Edge WS 连接创建失败: %s', (e as Error).message);
+            scheduleReconnect();
+            return;
+        }
+
+        ws.on('open', () => {
+            logger.success('Edge WS 连接成功: %s', endpoint);
+            retryDelay = 5000;
+            flushQueue();
+            startHeartbeat();
+            sendHandshake();
+            sendToolsNotification('bootstrap');
+        });
+
+        ws.on('message', (data: any) => {
+            handleInboundMessage(data).catch((err) => {
+                logger.warn('处理 Edge WS 消息失败: %s', err.message);
+            });
+        });
+
+        ws.on('close', (code: number, reason: Buffer) => {
+            logger.warn('Edge WS 连接关闭 (%s): %s', code, reason?.toString?.() || '');
+            ws = null;
+            stopHeartbeat();
+            if (!stopped) scheduleReconnect();
+        });
+
+        ws.on('error', (err: Error) => {
+            logger.warn('Edge WS 错误: %s', err.message);
+        });
+    };
+
+    connect();
+
+    const unsubscribeTools = onNodeToolsUpdated((tools) => {
+        sendToolsNotification('tools-change', tools);
+    });
+    listeners.push(unsubscribeTools);
+
+    const handle: EdgeBridgeHandle = {
+        send: enqueueEnvelope,
+        dispose: () => {
+            stopped = true;
+            stopHeartbeat();
+            if (reconnectTimer) {
+                clearTimeout(reconnectTimer);
+                reconnectTimer = null;
+            }
+            if (ws) {
+                try { ws.close(); } catch { /* ignore */ }
+                ws = null;
+            }
+            for (const dispose of listeners) {
+                try { dispose?.(); } catch { /* ignore */ }
+            }
+        },
+    };
+
+    edgeBridgeHandle = handle;
+
+    return () => {
+        if (edgeBridgeHandle === handle) edgeBridgeHandle = null;
+        handle.dispose();
+    };
 }
 
 const NODE_TOOL_REFRESH_INTERVAL = 10 * 60 * 1000;
@@ -432,11 +702,6 @@ function normalizeNodeUpstream(target: string): string | null {
 export function resolveNodeId(): string {
     const explicit = ((config as any).nodeId || process.env.NODE_ID || '').toString().trim();
     if (explicit) return explicit;
-    const mqttUsername = ((config as any).mqtt?.username || '').toString();
-    if (mqttUsername.includes(':')) {
-        const [, nodePart] = mqttUsername.split(':');
-        if (nodePart && nodePart.trim()) return nodePart.trim();
-    }
     const host = os.hostname();
     if (host) return host;
     return `node-${process.pid}`;
@@ -654,58 +919,14 @@ async function fetchZigbeeDevices(ctx?: Context): Promise<any[]> {
 
 function setupNodeMCPRegistration(ctx?: Context) {
     if (!ctx) return () => {};
-    const upstreamUrl = normalizeNodeUpstream(((config as any).upstream || '').toString());
-    if (!upstreamUrl) {
-        logger.warn('未配置上游 MCP 服务器 (config.upstream)，跳过 MCP 工具自动注册');
-        return () => {};
-    }
-
-    let WS: any;
-    try {
-        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
-        WS = require('ws');
-    } catch (e) {
-        logger.error('缺少 ws 依赖，请安装依赖 "ws" 以启用 MCP 工具自动注册');
-        return () => {};
-    }
-
-    const nodeId = resolveNodeId();
+    const nodeId = getResolvedNodeId();
     const advertiseHost = resolveAdvertisedHost();
     const advertisePort = resolveAdvertisedPort();
-
-    let ws: any = null;
-    let reconnectTimer: NodeJS.Timeout | null = null;
-    let retryDelay = 5000;
-    let stopped = false;
-    let latestToolsPayload: any[] = [];
     let currentToolsSignature = '';
     let currentDynamicSignature = '';
     const listeners: Array<() => void> = [];
 
-    const sendTools = async (mode: 'init' | 'tools-update') => {
-        if (!ws || ws.readyState !== WS.OPEN) return;
-        if (!latestToolsPayload.length) {
-            latestToolsPayload = decorateToolsForAdvertise(listNodeTools(true) as NodeToolDefinition[], nodeId, advertiseHost, advertisePort);
-            currentToolsSignature = computeToolsSignature(latestToolsPayload);
-        }
-        const payload = {
-            type: mode,
-            nodeId,
-            host: advertiseHost,
-            port: advertisePort,
-            tools: latestToolsPayload,
-            toolsHash: computeToolsSignature(latestToolsPayload),
-            timestamp: Date.now(),
-        };
-        try {
-            ws.send(JSON.stringify(payload));
-            logger.info('已向上游同步 %d 个 MCP 工具（%s）', latestToolsPayload.length, mode);
-        } catch (e) {
-            logger.warn('发送 MCP 工具同步消息失败: %s', (e as Error).message);
-        }
-    };
-
-    const rebuildDynamicTools = async (reason: string, devices?: any[], options: { skipPush?: boolean; force?: boolean } = {}) => {
+    const rebuildDynamicTools = async (reason: string, devices?: any[], options: { force?: boolean } = {}) => {
         try {
             let targetDevices = devices;
             if (!Array.isArray(targetDevices) || !targetDevices.length) {
@@ -719,77 +940,25 @@ function setupNodeMCPRegistration(ctx?: Context) {
                 currentDynamicSignature = entrySignature;
                 logger.info('自动注册 %d 个 Zigbee MCP 工具（原因: %s）', entries.length, reason);
             }
-            const decorated = decorateToolsForAdvertise(listNodeTools(true) as NodeToolDefinition[], nodeId, advertiseHost, advertisePort);
-            latestToolsPayload = decorated;
+            const decorated = decorateToolsForAdvertise(
+                listNodeTools(true) as NodeToolDefinition[],
+                nodeId,
+                advertiseHost,
+                advertisePort,
+            );
             const newToolsSignature = computeToolsSignature(decorated);
             const signatureChanged = newToolsSignature !== currentToolsSignature;
-            currentToolsSignature = newToolsSignature;
-            if (!options.skipPush && (entriesChanged || signatureChanged || options.force) && ws && ws.readyState === WS.OPEN) {
-                await sendTools('tools-update');
+            if (signatureChanged || options.force) {
+                currentToolsSignature = newToolsSignature;
+                notifyNodeToolsUpdated(decorated);
+                logger.info('MCP 工具快照更新（原因: %s，工具数: %d）', reason, decorated.length);
             }
         } catch (e) {
             logger.warn('刷新 MCP 工具失败（原因: %s）: %s', reason, (e as Error).message);
         }
     };
 
-    const scheduleReconnect = () => {
-        if (stopped) return;
-        if (reconnectTimer) return;
-        reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connect();
-        }, retryDelay);
-        logger.info('将在 %d 秒后重试连接 MCP 上游', Math.round(retryDelay / 1000));
-        retryDelay = Math.min(retryDelay * 1.5, 30000);
-    };
-
-    const connect = () => {
-        if (stopped) return;
-        if (ws && (ws.readyState === WS.OPEN || ws.readyState === WS.CONNECTING)) return;
-        try {
-            ws = new WS(upstreamUrl, { perMessageDeflate: false });
-        } catch (e) {
-            logger.error('连接 MCP 上游失败: %s', (e as Error).message);
-            scheduleReconnect();
-            return;
-        }
-
-        ws.on('open', async () => {
-            logger.info('MCP 上游连接成功: %s', upstreamUrl);
-            retryDelay = 5000;
-            try {
-                await rebuildDynamicTools('ws-open', undefined, { skipPush: true, force: true });
-                await sendTools('init');
-            } catch (e) {
-                logger.warn('初始 MCP 工具注册失败: %s', (e as Error).message);
-            }
-        });
-
-        ws.on('message', (data: any) => {
-            try {
-                const text = typeof data === 'string' ? data : data.toString('utf8');
-                const message = JSON.parse(text);
-                if (message?.type === 'refresh-tools') {
-                    logger.info('接收到上游刷新指令，开始重新同步 MCP 工具');
-                    void rebuildDynamicTools('refresh-command', undefined, { force: true });
-                }
-            } catch (e) {
-                logger.debug?.('解析 MCP 上游消息失败: %s', (e as Error).message);
-            }
-        });
-
-        ws.on('close', (code: number, reason: Buffer) => {
-            logger.warn('MCP 上游连接已关闭 (%s): %s', code, reason?.toString?.() || '');
-            ws = null;
-            if (!stopped) scheduleReconnect();
-        });
-
-        ws.on('error', (err: Error) => {
-            logger.warn('MCP 上游连接错误: %s', err.message);
-        });
-    };
-
-    void rebuildDynamicTools('bootstrap', undefined, { skipPush: true, force: true });
+    void rebuildDynamicTools('bootstrap', undefined, { force: true });
 
     const disposeDevices = ctx.on?.('zigbee2mqtt/devices' as any, (devs: any[]) => {
         void rebuildDynamicTools('devices-event', devs);
@@ -797,7 +966,7 @@ function setupNodeMCPRegistration(ctx?: Context) {
     if (typeof disposeDevices === 'function') listeners.push(disposeDevices);
 
     const disposeConnected = ctx.on?.('zigbee2mqtt/connected' as any, () => {
-        void rebuildDynamicTools('zigbee-connected');
+        void rebuildDynamicTools('zigbee-connected', undefined, { force: true });
     });
     if (typeof disposeConnected === 'function') listeners.push(disposeConnected);
 
@@ -806,18 +975,7 @@ function setupNodeMCPRegistration(ctx?: Context) {
     }, NODE_TOOL_REFRESH_INTERVAL);
     listeners.push(() => clearInterval(interval));
 
-    connect();
-
     return () => {
-        stopped = true;
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-            reconnectTimer = null;
-        }
-        if (ws) {
-            try { ws.close(); } catch { /* ignore */ }
-            ws = null;
-        }
         for (const dispose of listeners) {
             try { dispose?.(); } catch { /* ignore */ }
         }
@@ -828,8 +986,12 @@ function startNodeConnecting(ctx?: Context) {
     // 连接本地MQTT broker（用于zigbee2mqtt控制）
     connectToLocalMqttBroker(ctx);
     const disposeMcp = setupNodeMCPRegistration(ctx);
+    const disposeEdge = startEdgeEnvelopeBridge(ctx);
+    const disposeState = setupDeviceStateListener(ctx);
     return () => {
         try { disposeMcp?.(); } catch { /* ignore */ }
+        try { disposeEdge?.(); } catch { /* ignore */ }
+        try { disposeState?.(); } catch { /* ignore */ }
     };
 }
 

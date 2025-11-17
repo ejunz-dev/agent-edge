@@ -70,32 +70,22 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
         const nodeConfigDefault = `\
 # 控制节点（Node）配置，仅负责 Zigbee2MQTT 管理与设备控制桥接
 port: 5284
-# 上游服务器WebSocket连接地址（用于主动连接上游服务器）
-upstream: 'ws://localhost:5283' # 例如 'ws://192.168.1.10:5283' 或 'wss://example.com'
 # 对外暴露的地址和端口（可选，如果服务器需要回连本节点）
 publicHost: '' # 例如 '192.168.1.20'，留空则自动使用主机名
 publicPort: 0 # 0 表示使用 port 配置
-# 自定义节点 ID（可选，留空则使用主机名或 MQTT 用户名）
+# 自定义节点 ID（可选，留空则使用主机名）
 nodeId: ''
-# 上游MQTT Broker配置（不是本项目的server）
-mqtt:
-  mqttUrl: 'mqtt://localhost:1883' # 上游MQTT Broker地址
-  baseTopic: 'zigbee2mqtt'
-  username: ''
-  password: ''
+# Edge WebSocket 连接配置（必需）
+ws:
+  endpoint: 'wss://example.com/mcp/ws?token=xxx' # 上游 Edge WebSocket endpoint (完整 URL)
+  localEndpoint: '/mcp/ws' # 本地 WebSocket 服务器路径（可选）
+  enabled: true
+# Zigbee2MQTT 配置（连接到本地 MQTT Broker，默认 localhost:1883）
 zigbee2mqtt:
   enabled: true
-  mqttUrl: 'mqtt://localhost:1883' # 连接到上游MQTT Broker（优先使用mqtt配置）
-  baseTopic: 'zigbee2mqtt'
-  username: ''
-  password: ''
+  baseTopic: 'zigbee2mqtt' # MQTT 主题前缀
   autoStart: true # node 启动时自动拉起 zigbee2mqtt 进程
-  adapter: '/dev/ttyUSB0'
-# MCP Provider 配置（与 provider 模式相同，用于向上游提供 MCP 工具）
-ws:
-  endpoint: '' # 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws?token=xxx)
-  localEndpoint: '/mcp/ws' # 本地 WebSocket 服务器路径
-  enabled: true
+  adapter: '/dev/ttyUSB0' # Zigbee 适配器设备路径
 `;
         const clientConfigDefault = yaml.dump({
             server: '',
@@ -312,21 +302,10 @@ const clientSchema = Schema.object({
 
 const nodeSchema = Schema.object({
     nodeId: Schema.string().default(''),
-    port: Schema.number().default(5283),
-    upstream: Schema.string().default('ws://localhost:5283'), // 上游服务器WebSocket连接地址
+    port: Schema.number().default(5284),
     publicHost: Schema.string().default(''),
     publicPort: Schema.number().default(0),
-    mqtt: Schema.object({
-        mqttUrl: Schema.string().default('mqtt://localhost:1883'),
-        baseTopic: Schema.string().default('zigbee2mqtt'),
-        username: Schema.string().default(''),
-        password: Schema.string().default(''),
-    }).default({
-        mqttUrl: 'mqtt://localhost:1883',
-        baseTopic: 'zigbee2mqtt',
-        username: '',
-        password: '',
-    }),
+    // 本地 MQTT Broker（默认启用，端口1883，无需配置）
     broker: Schema.object({
         enabled: Schema.boolean().default(true),
         port: Schema.number().default(1883),
@@ -367,25 +346,19 @@ const nodeSchema = Schema.object({
     }),
     zigbee2mqtt: Schema.object({
         enabled: Schema.boolean().default(true),
-        mqttUrl: Schema.string().default('mqtt://localhost:1883'),
         baseTopic: Schema.string().default('zigbee2mqtt'),
-        username: Schema.string().default(''),
-        password: Schema.string().default(''),
         autoStart: Schema.boolean().default(true), // node 模式下默认自动启动
         adapter: Schema.string().default('/dev/ttyUSB0'),
     }).default({
         enabled: true,
-        mqttUrl: 'mqtt://localhost:1883',
         baseTopic: 'zigbee2mqtt',
-        username: '',
-        password: '',
         autoStart: true,
         adapter: '/dev/ttyUSB0',
     }),
-    // MCP Provider 配置（与 provider 模式相同）
+    // Edge WebSocket 连接配置（必需）
     ws: Schema.object({
-        endpoint: Schema.string().default(''), // 上游 MCP WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws)
-        localEndpoint: Schema.string().default('/mcp/ws'), // 本地 WebSocket 服务器路径
+        endpoint: Schema.string().default(''), // 上游 Edge WebSocket endpoint (完整 URL，如 wss://example.com/mcp/ws?token=xxx)
+        localEndpoint: Schema.string().default('/mcp/ws'), // 本地 WebSocket 服务器路径（可选）
         enabled: Schema.boolean().default(true),
     }).default({
         endpoint: '',

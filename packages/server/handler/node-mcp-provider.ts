@@ -447,11 +447,11 @@ export async function apply(ctx: Context) {
         logger.info(`Node MCP WebSocket endpoint (server): ${localEndpoint}`);
     }
     
-    // 连接到上游 MCP endpoint（作为客户端）
-    const dispose = setupNodeMCPClient(ctx);
-    if (dispose) {
-        // 在服务停止时清理连接
-        ctx.on('dispose' as any, dispose);
-    }
+    // 注意：上游 MCP 连接已由 client/node.ts 中的 Edge WS 统一协议处理
+    // 不再使用旧的 setupNodeMCPClient，避免重复连接冲突
+    // const dispose = setupNodeMCPClient(ctx);
+    // if (dispose) {
+    //     ctx.on('dispose' as any, dispose);
+    // }
 }
 

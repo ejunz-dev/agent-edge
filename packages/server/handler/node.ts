@@ -170,28 +170,27 @@ export class NodeConnectionHandler extends ConnectionHandler<Context> {
                 if (!Number.isNaN(parsedPort)) this.nodePort = parsedPort;
             }
 
-            const brokerConfig = (config as any).mqtt || (config as any).zigbee2mqtt || {};
-            this.mqttUrl = brokerConfig.mqttUrl || process.env.MQTT_URL || 'mqtt://localhost:1883';
+            // 本地broker默认 localhost:1883（无需配置）
+            const z2mConfig = (config as any).zigbee2mqtt || {};
+            this.mqttUrl = 'mqtt://localhost:1883';
 
             connectedNodes.set(this.nodeId, this);
             (this as any).nodeHost = this.nodeHost;
             (this as any).nodePort = this.nodePort;
 
-                // 先发送 broker 配置，确保连接保持
+                // 发送本地broker配置（已废弃，保留兼容性）
                 try {
                     this.send({
                         type: 'broker-config',
                         mqttUrl: this.mqttUrl,
-                        baseTopic: brokerConfig.baseTopic || 'zigbee2mqtt',
-                        username: brokerConfig.username || '',
-                        password: brokerConfig.password || '',
+                        baseTopic: z2mConfig.baseTopic || 'zigbee2mqtt',
                     });
                     logger.debug('已发送 broker-config 消息给 Node %s', this.nodeId);
                 } catch (e) {
                     logger.error('发送 broker-config 失败: %s', (e as Error).message);
                 }
 
-                logger.info('Node connected: %s, Broker: %s, Address: %s:%d', this.nodeId, this.mqttUrl, this.nodeHost, this.nodePort);
+                logger.info('Node connected: %s, Local Broker: %s, Address: %s:%d', this.nodeId, this.mqttUrl, this.nodeHost, this.nodePort);
                 
                 // 异步执行持久化，不阻塞消息处理
                 persistNodeTools(

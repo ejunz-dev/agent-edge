@@ -124,7 +124,7 @@ class ProviderMCPApiHandler extends Handler<Context> {
 
 // 主动连接到配置的WebSocket URL（客户端模式）
 function startMCPConnection(ctx: Context) {
-    // 使用 edge 逻辑来决定上游地址：优先 edgeUpstream，然后 ENV EDGE_UPSTREAM，最后 ws.endpoint
+    // 使用 edge 逻辑来决定上游地址：优先 ws.upstream，然后 edgeUpstream，然后 ENV EDGE_UPSTREAM，最后 ws.endpoint
     // 使用 /mcp/ws 端点
     const normalizeFromHost = (host: string) => {
         if (!host) return '';
@@ -138,14 +138,15 @@ function startMCPConnection(ctx: Context) {
         return `wss://${host}/mcp/ws`;
     };
     const fromHost = normalizeFromHost((config as any).host || '');
-    const target = (config as any).edgeUpstream
+    const target = config.ws?.upstream
+        || (config as any).edgeUpstream
         || process.env.EDGE_UPSTREAM
         || fromHost
         || config.ws?.endpoint
         || '';
     
     if (!target) {
-        logger.warn('[provider-mcp] 未配置WebSocket endpoint，跳过主动连接。请设置 edgeUpstream、EDGE_UPSTREAM 或 ws.endpoint');
+        logger.warn('[provider-mcp] 未配置WebSocket endpoint，跳过主动连接。请设置 ws.upstream、edgeUpstream、EDGE_UPSTREAM 或 ws.endpoint');
         return () => {};
     }
 

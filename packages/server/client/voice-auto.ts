@@ -331,6 +331,7 @@ export function handleRealtimeAsrMessage(data: any) {
         // server已经自动转发转录文本到AI API，client不需要处理
         // 只更新currentTranscription用于显示
         currentTranscription = finalText;
+        
     }
     
     // 处理新的语音开始（speech_started）
@@ -791,7 +792,6 @@ async function sendTextToServer(text: string, isSystemMessage = false) {
             logger.info('已发送转录文本到服务器进行 AI 对话: %s', text);
         }
         
-        // 消息已发送
     } catch (e: any) {
         logger.error('发送文本失败: %s', e.message);
     }

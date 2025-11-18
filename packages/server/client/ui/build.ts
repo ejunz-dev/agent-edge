@@ -80,7 +80,15 @@ const compiler = webpack({
     ],
   },
   plugins: [
-    new webpack.ProgressPlugin(),
+    new webpack.ProgressPlugin({
+      activeModules: false,
+      entries: true,
+      modules: false,
+      modulesCount: 5000,
+      profile: false,
+      dependencies: false,
+      dependenciesCount: 10000,
+    }),
     new webpack.ProvidePlugin({
       React: 'react',
     }),
@@ -90,25 +98,54 @@ const compiler = webpack({
     new webpack.optimize.MinChunkSizePlugin({
       minChunkSize: 128000,
     }),
+    // 在开发模式下生成 HTML
+    ...(dev ? [new (require('html-webpack-plugin'))({
+      template: path.resolve(__dirname, 'index.html'),
+      filename: 'index.html',
+      inject: 'body',
+      templateParameters: {
+        ENTRY: '/main.js',
+      },
+    })] : []),
   ],
 });
 
 const logger = new Logger('build');
-logger.info('Building...');
+logger.info('Building Client UI...');
 
 (async () => {
   if (dev) {
     const server = new WebpackDevServer({
-      port: 8081,
+      port: 8082,
       compress: true,
       hot: true,
       server: 'http',
       allowedHosts: 'all',
+      historyApiFallback: {
+        index: '/index.html',
+      },
       proxy: [{
-        context: (p) => p !== '/ws',
-        target: process.env.TOOLS_API || 'http://localhost:5285',
+        context: (pathname) => {
+          // 排除 webpack-dev-server 自己的文件和静态资源
+          // 但允许所有其他路径（包括 WebSocket）代理到后端
+          return pathname !== '/ws' 
+            && !pathname.startsWith('/sockjs-node')
+            && pathname !== '/main.js'
+            && pathname !== '/index.html'
+            && !pathname.startsWith('/node_modules')
+            && !pathname.startsWith('/static');
+        },
+        target: process.env.TOOLS_API || 'http://localhost:5283',
         ws: true, // 启用 WebSocket 代理
         changeOrigin: true,
+        logLevel: 'debug',
+        onProxyReqWs: (proxyReq, req, socket) => {
+          // WebSocket 代理请求的日志
+          console.log('[WebSocket Proxy] Proxying WebSocket:', req.url);
+        },
+        onError: (err, req, res) => {
+          console.error('[Proxy Error]', err.message);
+        },
       }],
       client: {
         webSocketURL: 'auto://0.0.0.0:0/ws',
@@ -125,8 +162,8 @@ logger.info('Building...');
     }
     if (argv.options.detail) logger.info(stats.toString());
     if (!watch && (!stats || stats.hasErrors())) process.exit(1);
-    fs.ensureDirSync(path.resolve(__dirname, '../server/data/'));
-    fs.copyFileSync(path.resolve(__dirname, 'dist/main.js'), path.resolve(__dirname, '../server/data/static.provider-ui'));
+    fs.ensureDirSync(path.resolve(__dirname, '../../data/'));
+    fs.copyFileSync(path.resolve(__dirname, 'dist/main.js'), path.resolve(__dirname, '../../data/static.client-ui'));
     logger.info('Build finished, bundle size:', ((stats?.toJson().assets?.[0]?.size || 0) / 1024 / 1024).toFixed(2), 'MB');
   }
   if (watch) compiler.watch({}, compilerCallback);

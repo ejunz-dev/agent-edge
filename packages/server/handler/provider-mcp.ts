@@ -58,9 +58,20 @@ class ProviderMCPApiHandler extends Handler<Context> {
 
         try {
             if (method === 'tools/list') {
-                const tools = listTools();
+                const tools = listTools().map((t: any) => ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
+                }));
                 this.response.type = 'application/json';
                 this.response.body = reply({ result: { tools } });
+                return;
+            }
+
+            if (method === 'notifications/initialized') {
+                // MCP协议：客户端初始化完成通知
+                this.response.type = 'application/json';
+                this.response.body = reply({ result: {} });
                 return;
             }
 
@@ -72,20 +83,31 @@ class ProviderMCPApiHandler extends Handler<Context> {
                 
                 const result = await callTool(this.ctx, { name, arguments: args });
                 
-                // 记录并广播
+                // 记录并广播（纯内存，不存储到数据库）
                 try {
-                    const log = await this.ctx.db.mcplog.insert({
+                    const log = {
                         timestamp: Date.now(),
                         level: 'info',
                         message: `Tool called: ${name}`,
                         tool: name,
                         metadata: { args, result, duration: Date.now() - startTime },
-                    });
-                    try { await (this.ctx as any).emit('mcp/log', log); } catch {}
+                    };
+                    // 使用全局context确保事件能传播到所有订阅者
+                    const globalCtx = (global as any).__cordis_ctx || this.ctx;
+                    try { await (globalCtx as any).emit('mcp/log', log); } catch (e) {
+                        logger.debug('[provider-mcp] emit log failed', e);
+                    }
                 } catch {}
                 
+                // MCP协议要求返回格式：{ content: [{ type: 'text', text: ... }] }
+                const mcpResult = {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify(result)
+                    }]
+                };
                 this.response.type = 'application/json';
-                this.response.body = reply({ result });
+                this.response.body = reply({ result: mcpResult });
                 return;
             }
         } catch (e) {
@@ -100,36 +122,163 @@ class ProviderMCPApiHandler extends Handler<Context> {
     }
 }
 
-// WebSocket MCP Handler
-export class ProviderMCPWebSocketHandler extends ConnectionHandler<Context> {
-    async open() {
-        logger.info('[provider-mcp/ws] connection opened');
+// 主动连接到配置的WebSocket URL（客户端模式）
+function startMCPConnection(ctx: Context) {
+    // 使用 edge 逻辑来决定上游地址：优先 ws.upstream，然后 edgeUpstream，然后 ENV EDGE_UPSTREAM，最后 ws.endpoint
+    // 使用 /mcp/ws 端点
+    const normalizeFromHost = (host: string) => {
+        if (!host) return '';
+        if (/^https?:\/\//i.test(host)) {
+            const base = host.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:');
+            return new URL(base.endsWith('/') ? 'mcp/ws' : '/mcp/ws', base).toString();
+        }
+        if (/^wss?:\/\//i.test(host)) {
+            return new URL(host.endsWith('/') ? 'mcp/ws' : '/mcp/ws', host).toString();
+        }
+        return `wss://${host}/mcp/ws`;
+    };
+    const fromHost = normalizeFromHost((config as any).host || '');
+    const target = config.ws?.upstream
+        || (config as any).edgeUpstream
+        || process.env.EDGE_UPSTREAM
+        || fromHost
+        || config.ws?.endpoint
+        || '';
+    
+    if (!target) {
+        logger.warn('[provider-mcp] 未配置WebSocket endpoint，跳过主动连接。请设置 ws.upstream、edgeUpstream、EDGE_UPSTREAM 或 ws.endpoint');
+        return () => {};
     }
 
-    async message(data: any) {
+    // 如果配置的是路径，需要转换为完整URL
+    let wsUrl = target;
+    if (!target.startsWith('ws://') && !target.startsWith('wss://')) {
+        // 如果是路径，使用当前服务器地址
+        const port = config.port || 5285;
+        wsUrl = `ws://localhost:${port}${target.startsWith('/') ? target : '/' + target}`;
+        logger.warn('[provider-mcp] endpoint配置为路径，已转换为: %s', wsUrl);
+    }
+
+    let WS: any;
+    try {
+        // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+        WS = require('ws');
+    } catch (e) {
+        logger.error('[provider-mcp] 缺少 ws 依赖，请安装依赖 "ws" 后重试。');
+        return () => {};
+    }
+
+    let ws: any = null;
+    let stopped = false;
+    let retryDelay = 3000;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let connecting = false;
+    let connectTimeout: NodeJS.Timeout | null = null;
+
+    const scheduleReconnect = () => {
+        if (stopped) return;
+        if (reconnectTimer) return;
+        const nextDelay = Math.min(retryDelay, 30000);
+        logger.info('[provider-mcp] 将在 %ds 后重试连接...', Math.round(nextDelay / 1000));
+        reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            if (!stopped) connect();
+        }, nextDelay);
+        retryDelay = Math.min(nextDelay * 2, 30000);
+    };
+
+    const handleMessage = async (data: any) => {
         try {
-            const request = typeof data === 'string' ? JSON.parse(data) : data;
+            // 记录原始数据以便调试
+            let rawData: string;
+            if (Buffer.isBuffer(data)) {
+                rawData = data.toString('utf8');
+            } else if (typeof data === 'string') {
+                rawData = data;
+            } else {
+                rawData = JSON.stringify(data);
+            }
+            
+            // 尝试解析 JSON
+            let request: any;
+            try {
+                request = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
+            } catch (parseError) {
+                logger.warn('[provider-mcp] 无法解析消息为 JSON，原始内容: %s', rawData.substring(0, 200));
+                return; // 无法解析的消息直接忽略
+            }
+            
             const id = request?.id ?? null;
             const method = request?.method;
 
-            logger.info('[provider-mcp/ws] incoming', { method, id });
+            // 记录完整消息内容（用于调试）
+            logger.debug('[provider-mcp] 收到消息: %s (id: %s), 完整内容: %s', method || 'unknown', id, JSON.stringify(request).substring(0, 500));
+            logger.info('[provider-mcp] 收到消息: %s (id: %s)', method || 'unknown', id);
 
-            const reply = (data: any) => ({ jsonrpc: '2.0', id, ...data });
+            const reply = (data: any) => {
+                const response = { jsonrpc: '2.0', id, ...data };
+                try {
+                    ws.send(JSON.stringify(response));
+                } catch (e) {
+                    logger.error('[provider-mcp] 发送响应失败', e);
+                }
+            };
+
+            // 处理 initialize 响应（id === 1 且没有 method 字段，说明是响应）
+            if (id === 1 && request.result && !request.method) {
+                // 这是 initialize 的响应
+                logger.info('[provider-mcp] 收到 initialize 响应');
+                // 发送 initialized 通知
+                const initializedNotification = {
+                    jsonrpc: '2.0',
+                    method: 'notifications/initialized',
+                };
+                try {
+                    ws.send(JSON.stringify(initializedNotification));
+                    logger.info('[provider-mcp] 已发送 initialized 通知');
+                } catch (e) {
+                    logger.error('[provider-mcp] 发送 initialized 通知失败', e);
+                }
+                
+                // 发送 provider 注册消息（类似 Node 的 init 消息）
+                // 这样上游服务器才能识别这是一个 provider 连接并注册工具
+                try {
+                    const tools = listTools();
+                    const providerInit = {
+                        type: 'provider/init',
+                        providerId: `provider_${Date.now()}`,
+                        tools: tools.map((t: any) => ({
+                            name: t.name,
+                            description: t.description,
+                            inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
+                        })),
+                    };
+                    ws.send(JSON.stringify(providerInit));
+                    logger.info('[provider-mcp] 已发送 provider 注册消息，工具数量: %d', tools.length);
+                } catch (e) {
+                    logger.error('[provider-mcp] 发送 provider 注册消息失败', e);
+                }
+                return;
+            }
 
             if (method === 'initialize') {
-                this.send(reply({
+                reply({
                     result: {
                         protocolVersion: '2024-11-05',
                         capabilities: { tools: {}, resources: {} },
                         serverInfo: { name: 'mcp-provider-server', version: '1.0.0' },
                     },
-                }));
+                });
                 return;
             }
 
             if (method === 'tools/list') {
-                const tools = listTools();
-                this.send(reply({ result: { tools } }));
+                const tools = listTools().map((t: any) => ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
+                }));
+                reply({ result: { tools } });
                 return;
             }
 
@@ -140,42 +289,210 @@ export class ProviderMCPWebSocketHandler extends ConnectionHandler<Context> {
                 logger.info('[MCP工具调用] %s 参数: %o', name, args);
                 
                 try {
-                    const result = await callTool(this.ctx, { name, arguments: args });
+                    const result = await callTool(ctx, { name, arguments: args });
                     
-                    // 记录并广播
+                    // 记录并广播（纯内存，不存储到数据库）
                     try {
-                        const log = await this.ctx.db.mcplog.insert({
+                        const log = {
                             timestamp: Date.now(),
                             level: 'info',
                             message: `Tool called: ${name}`,
                             tool: name,
                             metadata: { args, result, duration: Date.now() - startTime },
-                        });
-                        try { await (this.ctx as any).emit('mcp/log', log); } catch {}
+                        };
+                        // 使用全局context确保事件能传播到所有订阅者
+                        const globalCtx = (global as any).__cordis_ctx || ctx;
+                        try { await (globalCtx as any).emit('mcp/log', log); } catch (e) {
+                            logger.debug('[provider-mcp] emit log failed', e);
+                        }
                     } catch {}
                     
-                    this.send(reply({ result }));
+                    // MCP协议要求返回格式：{ content: [{ type: 'text', text: ... }] }
+                    const mcpResult = {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify(result)
+                        }]
+                    };
+                    reply({ result: mcpResult });
                 } catch (e) {
-                    logger.error('[provider-mcp/ws] tool call error', e);
-                    this.send(reply({ error: { code: -32603, message: (e as Error).message } }));
+                    logger.error('[provider-mcp] tool call error', e);
+                    reply({ error: { code: -32603, message: (e as Error).message } });
                 }
                 return;
             }
 
-            this.send(reply({ error: { code: -32601, message: 'Method not found' } }));
-        } catch (e) {
-            logger.error('[provider-mcp/ws] error', e);
-            this.send({
-                jsonrpc: '2.0',
-                id: null,
-                error: { code: -32700, message: 'Parse error' },
-            });
-        }
-    }
+            // 处理通知（notifications）- 通知没有 id，也不应该有响应
+            if (method && method.startsWith('notifications/')) {
+                logger.info('[provider-mcp] 收到通知: %s', method);
+                // 通知不需要响应，直接返回
+                return;
+            }
 
-    async close() {
-        logger.info('[provider-mcp/ws] connection closed');
-    }
+            // 处理上游服务器的自定义状态消息（非 JSON-RPC 格式）
+            // 这些消息有 type 字段，但不是标准的 JSON-RPC 请求
+            if (request.type && !method && id === null) {
+                const msgType = request.type;
+                // 静默处理常见的状态更新消息
+                if (msgType === 'status/update' || msgType === 'tools/synced' || msgType === 'status/connected' || msgType === 'status/disconnected') {
+                    logger.debug('[provider-mcp] 收到上游状态消息: %s', msgType);
+                    return; // 静默忽略，不记录警告
+                }
+                // 其他未知的 type 消息也静默处理，但记录 debug 日志
+                logger.debug('[provider-mcp] 收到上游自定义消息: %s', msgType);
+                return;
+            }
+
+            // 处理 ping/pong 心跳消息（某些 WebSocket 实现会发送）
+            if (rawData === 'ping' || rawData === 'PING' || request === 'ping' || request === 'PING') {
+                try {
+                    ws.send('pong');
+                } catch {}
+                return;
+            }
+            if (rawData === 'pong' || rawData === 'PONG' || request === 'pong' || request === 'PONG') {
+                return; // 收到 pong，无需处理
+            }
+
+            // 如果是通知但没有 method，或者 id 为 null 且没有 method，可能是无效消息
+            if (id === null && !method) {
+                // 如果消息是空对象或只有 jsonrpc 字段，可能是格式错误
+                if (Object.keys(request).length === 0 || (Object.keys(request).length === 1 && request.jsonrpc)) {
+                    logger.debug('[provider-mcp] 忽略空消息或仅包含 jsonrpc 的消息');
+                    return;
+                }
+                // 其他情况记录警告（但不会频繁出现，因为上面的 type 检查已经处理了大部分情况）
+                logger.debug('[provider-mcp] 收到非标准消息（无 method 且无 id），原始内容: %s', rawData.substring(0, 200));
+                return;
+            }
+
+            // 只有请求（有 id）才返回错误响应
+            if (id !== null && id !== undefined) {
+                reply({ error: { code: -32601, message: 'Method not found' } });
+            } else {
+                // 通知或无效消息，不发送响应
+                logger.warn('[provider-mcp] 收到未知通知或无效消息: %s', method || 'unknown');
+            }
+        } catch (e) {
+            logger.error('[provider-mcp] 处理消息失败', e);
+            try {
+                ws.send(JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: null,
+                    error: { code: -32700, message: 'Parse error' },
+                }));
+            } catch {}
+        }
+    };
+
+    const connect = () => {
+        if (stopped) return;
+        if (connecting) return;
+        connecting = true;
+
+        logger.info('[provider-mcp] 正在连接到: %s', wsUrl);
+
+        if (connectTimeout) {
+            clearTimeout(connectTimeout);
+        }
+        connectTimeout = setTimeout(() => {
+            if (connecting && ws && ws.readyState !== (ws as any).OPEN) {
+                logger.warn('[provider-mcp] 连接超时');
+                ws.close();
+                connecting = false;
+                scheduleReconnect();
+            }
+        }, 10000);
+
+        try {
+            ws = new WS(wsUrl);
+
+            ws.on('open', () => {
+                if (connectTimeout) {
+                    clearTimeout(connectTimeout);
+                    connectTimeout = null;
+                }
+                logger.info('[provider-mcp] 已连接到: %s', wsUrl);
+                retryDelay = 3000;
+                connecting = false;
+                
+                // MCP协议：连接后立即发送初始化请求
+                const initRequest = {
+                    jsonrpc: '2.0',
+                    method: 'initialize',
+                    id: 1,
+                    params: {
+                        protocolVersion: '2024-11-05',
+                        capabilities: {
+                            tools: {},
+                        },
+                        clientInfo: {
+                            name: 'mcp-provider-server',
+                            version: '1.0.0',
+                        },
+                    },
+                };
+                
+                try {
+                    ws.send(JSON.stringify(initRequest));
+                    logger.info('[provider-mcp] 已发送 initialize 请求');
+                } catch (e) {
+                    logger.error('[provider-mcp] 发送 initialize 请求失败', e);
+                }
+            });
+
+            ws.on('message', (data: any) => {
+                handleMessage(data);
+            });
+
+            ws.on('close', (code: number, reason: Buffer) => {
+                logger.info('[provider-mcp] 连接已关闭 (code: %s, reason: %s)', code, reason?.toString() || '');
+                connecting = false;
+                if (!stopped) {
+                    scheduleReconnect();
+                }
+            });
+
+            ws.on('error', (err: Error) => {
+                logger.error('[provider-mcp] WebSocket错误: %s', err.message);
+                connecting = false;
+                if (!stopped) {
+                    scheduleReconnect();
+                }
+            });
+        } catch (e) {
+            logger.error('[provider-mcp] 连接失败', e);
+            connecting = false;
+            if (connectTimeout) {
+                clearTimeout(connectTimeout);
+                connectTimeout = null;
+            }
+            scheduleReconnect();
+        }
+    };
+
+    // 延迟连接，等待服务就绪
+    setTimeout(() => {
+        connect();
+    }, 1000);
+
+    return () => {
+        stopped = true;
+        if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+        }
+        if (connectTimeout) {
+            clearTimeout(connectTimeout);
+            connectTimeout = null;
+        }
+        if (ws) {
+            try {
+                ws.close();
+            } catch {}
+            ws = null;
+        }
+    };
 }
 
 // HTTP/SSE API Handler (for external access like http://mcp.ejunz.com/api)
@@ -234,9 +551,20 @@ class ProviderExternalApiHandler extends Handler<Context> {
 
         try {
             if (method === 'tools/list') {
-                const tools = listTools();
+                const tools = listTools().map((t: any) => ({
+                    name: t.name,
+                    description: t.description,
+                    inputSchema: t.parameters || t.inputSchema || { type: 'object', properties: {} },
+                }));
                 this.response.type = 'application/json';
                 this.response.body = reply({ result: { tools } });
+                return;
+            }
+
+            if (method === 'notifications/initialized') {
+                // MCP协议：客户端初始化完成通知
+                this.response.type = 'application/json';
+                this.response.body = reply({ result: {} });
                 return;
             }
 
@@ -248,20 +576,31 @@ class ProviderExternalApiHandler extends Handler<Context> {
                 
                 const result = await callTool(this.ctx, { name, arguments: args });
                 
-                // 记录并广播
+                // 记录并广播（纯内存，不存储到数据库）
                 try {
-                    const log = await this.ctx.db.mcplog.insert({
+                    const log = {
                         timestamp: Date.now(),
                         level: 'info',
                         message: `Tool called: ${name}`,
                         tool: name,
                         metadata: { args, result, duration: Date.now() - startTime },
-                    });
-                    try { await (this.ctx as any).emit('mcp/log', log); } catch {}
+                    };
+                    // 使用全局context确保事件能传播到所有订阅者
+                    const globalCtx = (global as any).__cordis_ctx || this.ctx;
+                    try { await (globalCtx as any).emit('mcp/log', log); } catch (e) {
+                        logger.debug('[provider-mcp] emit log failed', e);
+                    }
                 } catch {}
                 
+                // MCP协议要求返回格式：{ content: [{ type: 'text', text: ... }] }
+                const mcpResult = {
+                    content: [{
+                        type: 'text',
+                        text: JSON.stringify(result)
+                    }]
+                };
                 this.response.type = 'application/json';
-                this.response.body = reply({ result });
+                this.response.body = reply({ result: mcpResult });
                 return;
             }
         } catch (e) {
@@ -497,18 +836,30 @@ export async function apply(ctx: Context) {
     // SSE Logs (for real-time log monitoring)
     ctx.Route('provider_logs_sse', '/api/logs/sse', ProviderLogsSSEHandler);
     
-    // WebSocket MCP Handler（作为服务器端，如果启用）
-    if (config.ws?.enabled !== false) {
-        const endpoint = config.ws?.endpoint || '/mcp/ws';
-        ctx.Connection('provider_mcp_ws', endpoint, ProviderMCPWebSocketHandler);
-        logger.info(`MCP WebSocket endpoint (server): ${endpoint}`);
-    }
-    
-    // 连接到上游 MCP endpoint（作为客户端）
-    const dispose = setupProviderMCPClient(ctx);
-    if (dispose) {
-        // 在服务停止时清理连接
-        ctx.on('dispose' as any, dispose);
+    // 主动连接到配置的WebSocket URL（客户端模式）
+    if (config.ws?.enabled !== false && config.ws?.endpoint) {
+        const disconnect = startMCPConnection(ctx);
+        // 在进程退出时断开连接
+        const cleanup = () => {
+            try {
+                disconnect();
+            } catch (err: any) {
+                logger.error('[provider-mcp] 清理连接失败: %s', err.message);
+            }
+            // 确保进程能够退出
+            setTimeout(() => {
+                process.exit(0);
+            }, 500);
+        };
+        process.on('SIGINT', cleanup);
+        process.on('SIGTERM', cleanup);
+        process.on('exit', () => {
+            try {
+                disconnect();
+            } catch { /* ignore */ }
+        });
+    } else if (config.ws?.enabled !== false) {
+        logger.warn('[provider-mcp] WebSocket已启用但未配置endpoint，请设置 ws.endpoint');
     }
 }
 

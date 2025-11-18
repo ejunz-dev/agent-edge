@@ -73,7 +73,7 @@ export function isVTuberClientConnected(): boolean {
 /**
  * 启动 VTuber 控制（连接到 VTube Studio）
  */
-export async function startVTuberServer(): Promise<void> {
+export async function startVTuberServer(ctx?: any): Promise<void> {
     try {
         // 从配置中读取 VTube Studio 设置
         const config = require('../config').config;
@@ -84,53 +84,92 @@ export async function startVTuberServer(): Promise<void> {
         logger.info('正在从数据库加载认证令牌...');
         let authToken: string | null = null;
         try {
-            const { getGlobalWsConnection } = require('./client');
-            const ws = getGlobalWsConnection();
-            if (ws && ws.readyState === 1) {
-                // 直接从数据库读取 token，等待更长时间（30秒）
-                authToken = await new Promise<string | null>((resolve) => {
-                    const timeout = setTimeout(() => {
-                        ws.removeListener('message', handler);
-                        logger.debug('读取认证令牌超时（30秒内未收到响应）');
-                        resolve(null);
-                    }, 30000); // 增加到 30 秒
-                    
-                    const handler = (data: any) => {
-                        try {
-                            let msg: any;
-                            if (typeof data === 'string') {
-                                msg = JSON.parse(data);
-                            } else if (Buffer.isBuffer(data)) {
-                                msg = JSON.parse(data.toString('utf8'));
-                            } else {
-                                msg = data;
-                            }
-                            
-                            if (msg && msg.key === 'vtuber_auth_token_get') {
-                                clearTimeout(timeout);
-                                ws.removeListener('message', handler);
-                                resolve(msg.authToken || null);
-                            }
-                        } catch (err) {
-                            // 忽略解析错误
-                        }
-                    };
-                    
-                    ws.on('message', handler);
-                    ws.send(JSON.stringify({
-                        key: 'vtuber_auth_token_get',
-                        host: vtsConfig.host || '127.0.0.1',
-                        port: vtsConfig.port || 8001,
-                    }));
-                });
+            // 优先尝试直接从本地数据库读取（client 模式）
+            // 尝试多种方式获取 Context 和数据库
+            const context = ctx || (global as any).__cordis_ctx;
+            let db: any = null;
+            
+            if (context) {
+                // 方式1: 通过 ctx.db 访问
+                if ((context as any).db && (context as any).db.vtuberAuthToken) {
+                    db = (context as any).db;
+                }
+                // 方式2: 通过 ctx.dbservice.db 访问
+                else if ((context as any).dbservice && (context as any).dbservice.db && (context as any).dbservice.db.vtuberAuthToken) {
+                    db = (context as any).dbservice.db;
+                }
+            }
+            
+            if (db && db.vtuberAuthToken) {
+                const host = vtsConfig.host || '127.0.0.1';
+                const port = vtsConfig.port || 8001;
+                const docId = `${host}:${port}`;
                 
-                if (authToken) {
-                    logger.info('✓ 从数据库加载到认证令牌');
-                } else {
-                    logger.debug('数据库中未找到认证令牌（可能需要首次认证）');
+                try {
+                    const doc = await db.vtuberAuthToken.findOne({ _id: docId });
+                    if (doc && doc.authToken) {
+                        authToken = doc.authToken;
+                        logger.info('✓ 从本地数据库加载到认证令牌');
+                    } else {
+                        logger.debug('本地数据库中未找到认证令牌（可能需要首次认证）');
+                    }
+                } catch (dbErr: any) {
+                    logger.debug('从本地数据库读取认证令牌失败: %s', dbErr.message);
                 }
             } else {
-                logger.debug('WebSocket 未连接，将使用空 token（稍后可能需要首次认证）');
+                logger.debug('数据库服务未就绪，将通过 WebSocket 请求令牌');
+            }
+            
+            // 如果本地数据库读取失败，尝试通过 WebSocket 请求（向后兼容）
+            if (!authToken) {
+                const { getGlobalWsConnection } = require('./client');
+                const ws = getGlobalWsConnection();
+                if (ws && ws.readyState === 1) {
+                    // 直接从数据库读取 token，等待更长时间（30秒）
+                    authToken = await new Promise<string | null>((resolve) => {
+                        const timeout = setTimeout(() => {
+                            ws.removeListener('message', handler);
+                            logger.debug('读取认证令牌超时（30秒内未收到响应）');
+                            resolve(null);
+                        }, 30000); // 增加到 30 秒
+                        
+                        const handler = (data: any) => {
+                            try {
+                                let msg: any;
+                                if (typeof data === 'string') {
+                                    msg = JSON.parse(data);
+                                } else if (Buffer.isBuffer(data)) {
+                                    msg = JSON.parse(data.toString('utf8'));
+                                } else {
+                                    msg = data;
+                                }
+                                
+                                if (msg && msg.key === 'vtuber_auth_token_get') {
+                                    clearTimeout(timeout);
+                                    ws.removeListener('message', handler);
+                                    resolve(msg.authToken || null);
+                                }
+                            } catch (err) {
+                                // 忽略解析错误
+                            }
+                        };
+                        
+                        ws.on('message', handler);
+                        ws.send(JSON.stringify({
+                            key: 'vtuber_auth_token_get',
+                            host: vtsConfig.host || '127.0.0.1',
+                            port: vtsConfig.port || 8001,
+                        }));
+                    });
+                    
+                    if (authToken) {
+                        logger.info('✓ 通过 WebSocket 从数据库加载到认证令牌');
+                    } else {
+                        logger.debug('数据库中未找到认证令牌（可能需要首次认证）');
+                    }
+                } else {
+                    logger.debug('WebSocket 未连接，将使用空 token（稍后可能需要首次认证）');
+                }
             }
         } catch (err: any) {
             logger.debug('从数据库读取认证令牌失败（将稍后重试）: %s', err.message);

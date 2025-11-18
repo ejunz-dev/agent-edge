@@ -415,6 +415,7 @@ export class ClientConnectionHandler extends ConnectionHandler<Context> {
 }
 
 export async function apply(ctx: Context) {
-    ctx.Route('edge_alive', '/edge', ClientAliveHandler);
-    ctx.Connection('edge_conn', '/edge/conn', ClientConnectionHandler);
+    // 注释掉 edge2client handler
+    // ctx.Route('edge_alive', '/edge', ClientAliveHandler);
+    // ctx.Connection('edge_conn', '/edge/conn', ClientConnectionHandler);
 }

@@ -409,46 +409,137 @@ export default function Chat() {
     const host = isDev ? 'localhost:5283' : window.location.host;
     const wsUrl = `${protocol}//${host}/client-ws`;
     
-    const newWs = new WebSocket(wsUrl);
+    let reconnectTimer: NodeJS.Timeout | null = null;
+    let heartbeatTimer: NodeJS.Timeout | null = null;
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = Infinity; // 无限重连
+    const baseReconnectDelay = 1000; // 基础重连延迟 1 秒
+    const maxReconnectDelay = 30000; // 最大重连延迟 30 秒
+    let currentReconnectDelay = baseReconnectDelay;
+    let isManualClose = false; // 标记是否为手动关闭
+    let heartbeatInterval = 30000; // 心跳间隔 30 秒
     
-    // 保存 ws 引用
-    wsRef.current = newWs;
-    
-    newWs.onopen = () => {
-      console.log('[对话] WebSocket 已连接');
-      newWs.send(JSON.stringify({ type: 'ready' }));
-      initAudio();
-      
-      // 尝试自动启用音频（可能需要用户交互）
-      setTimeout(() => {
-        if (currentAudioContextRef.current) {
-          currentAudioContextRef.current.resume().then(() => {
-            audioEnabledRef.current = true;
-            setAudioEnabled(true);
-            setStatus('已就绪');
-            
-            if (audioQueueRef.current.length > 0 && !isPlayingRef.current) {
-              startPlayback();
-            }
-          }).catch((err) => {
-            console.error('[音频播放器] 自动恢复 AudioContext 失败，需要用户交互:', err);
-            setStatus('需要启用音频');
-          });
-        }
-      }, 100);
+    const cleanup = () => {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
     };
     
-    newWs.onmessage = (wsEvent) => {
-      try {
-        const msg = JSON.parse(wsEvent.data);
-        console.log('[前端] 收到 WebSocket 消息:', msg);
+    const startHeartbeat = (ws: WebSocket) => {
+      // 清除旧的心跳定时器
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+      
+      heartbeatTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            // 发送心跳消息
+            ws.send(JSON.stringify({ type: 'ping' }));
+            console.log('[对话] 发送心跳消息');
+          } catch (err) {
+            console.error('[对话] 发送心跳失败:', err);
+            // 如果发送失败，尝试重连
+            ws.close();
+          }
+        } else {
+          // 连接已断开，清除心跳定时器
+          if (heartbeatTimer) {
+            clearInterval(heartbeatTimer);
+            heartbeatTimer = null;
+          }
+        }
+      }, heartbeatInterval);
+    };
+    
+    const connect = () => {
+      // 如果已经连接或正在连接，不重复连接
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        console.log('[对话] WebSocket 已连接或正在连接，跳过重连');
+        return;
+      }
+      
+      // 如果是手动关闭，不自动重连
+      if (isManualClose) {
+        console.log('[对话] 手动关闭，不自动重连');
+        return;
+      }
+      
+      console.log(`[对话] 尝试连接 WebSocket (尝试 ${reconnectAttempts + 1} 次)...`);
+      setStatus('正在连接...');
+      
+      const newWs = new WebSocket(wsUrl);
+      
+      // 保存 ws 引用
+      wsRef.current = newWs;
+      setWs(newWs);
+      
+      newWs.onopen = () => {
+        console.log('[对话] WebSocket 已连接');
+        setStatus('已连接');
         
-        // 处理事件格式消息（新协议）
-        // 支持两种格式：
-        // 1. { key: 'publish', event: 'tts/audio', payload: [...] }
-        // 2. { event: 'tts/audio', payload: [...] }
-        const eventName = msg.key === 'publish' ? msg.event : (msg.event ? msg.event : null);
-        const payload = msg.payload;
+        // 重置重连参数
+        reconnectAttempts = 0;
+        currentReconnectDelay = baseReconnectDelay;
+        
+        // 发送就绪消息
+        newWs.send(JSON.stringify({ type: 'ready' }));
+        
+        // 初始化音频
+        initAudio();
+        
+        // 启动心跳
+        startHeartbeat(newWs);
+        
+        // 尝试自动启用音频（可能需要用户交互）
+        setTimeout(() => {
+          if (currentAudioContextRef.current) {
+            currentAudioContextRef.current.resume().then(() => {
+              audioEnabledRef.current = true;
+              setAudioEnabled(true);
+              setStatus('已就绪');
+              
+              if (audioQueueRef.current.length > 0 && !isPlayingRef.current) {
+                startPlayback();
+              }
+            }).catch((err) => {
+              console.error('[音频播放器] 自动恢复 AudioContext 失败，需要用户交互:', err);
+              setStatus('需要启用音频');
+            });
+          }
+        }, 100);
+      };
+    
+      newWs.onmessage = (wsEvent) => {
+        try {
+          const msg = JSON.parse(wsEvent.data);
+          console.log('[前端] 收到 WebSocket 消息:', msg);
+          
+          // 处理心跳响应
+          if (msg.type === 'pong' || msg.type === 'status') {
+            if (msg.type === 'pong') {
+              console.log('[对话] 收到心跳响应');
+            } else if (msg.type === 'status') {
+              console.log('[对话] 收到状态消息:', msg.message);
+              // 更新状态显示
+              if (msg.message === '已连接' || msg.message === '等待上游连接...') {
+                setStatus(msg.message);
+              }
+            }
+            return;
+          }
+          
+          // 处理事件格式消息（新协议）
+          // 支持两种格式：
+          // 1. { key: 'publish', event: 'tts/audio', payload: [...] }
+          // 2. { event: 'tts/audio', payload: [...] }
+          const eventName = msg.key === 'publish' ? msg.event : (msg.event ? msg.event : null);
+          const payload = msg.payload;
         
         if (eventName) {
           console.log('[前端] 处理事件:', eventName, 'payload:', payload);
@@ -728,25 +819,71 @@ export default function Chat() {
         } else if (msg.type === 'done') {
           (window as any).audioDataSentComplete = true;
         }
-      } catch (e) {
-        console.error('[对话] 解析消息失败:', e);
-      }
+        } catch (e) {
+          console.error('[对话] 解析消息失败:', e);
+        }
+      };
+      
+      newWs.onerror = (error) => {
+        console.error('[对话] WebSocket 错误:', error);
+        setStatus('连接错误');
+      };
+      
+      newWs.onclose = (event) => {
+        console.log('[对话] WebSocket 已断开', {
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean,
+        });
+        
+        // 清除心跳定时器
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        
+        // 如果不是手动关闭，尝试重连
+        if (!isManualClose) {
+          setStatus(`连接断开，${Math.round(currentReconnectDelay / 1000)} 秒后重连...`);
+          
+          // 清除旧的重连定时器
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+          }
+          
+          // 计算重连延迟（指数退避，但有上限）
+          reconnectAttempts++;
+          currentReconnectDelay = Math.min(
+            baseReconnectDelay * Math.pow(1.5, reconnectAttempts - 1),
+            maxReconnectDelay
+          );
+          
+          // 安排重连
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            if (!isManualClose) {
+              connect();
+            }
+          }, currentReconnectDelay);
+        } else {
+          setStatus('已断开');
+        }
+      };
     };
     
-    newWs.onerror = (error) => {
-      console.error('[对话] WebSocket 错误:', error);
-    };
+    // 初始连接
+    connect();
     
-    newWs.onclose = () => {
-      console.log('[对话] WebSocket 已断开');
-      setStatus('已断开');
-    };
-    
-    setWs(newWs);
-    
+    // 清理函数
     return () => {
-      newWs.close();
-      wsRef.current = null;
+      isManualClose = true; // 标记为手动关闭
+      cleanup();
+      
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      
       if (currentAudioContextRef.current) {
         currentAudioContextRef.current.close();
       }
@@ -780,7 +917,15 @@ export default function Chat() {
 
   // 发送消息
   const handleSendMessage = () => {
-    if (!inputValue.trim() || !ws || ws.readyState !== WebSocket.OPEN) {
+    const currentWs = wsRef.current;
+    if (!inputValue.trim() || !currentWs || currentWs.readyState !== WebSocket.OPEN) {
+      if (!currentWs || currentWs.readyState !== WebSocket.OPEN) {
+        notifications.show({
+          title: '连接未就绪',
+          message: 'WebSocket 连接未建立，请等待连接...',
+          color: 'yellow',
+        });
+      }
       return;
     }
     
@@ -806,8 +951,17 @@ export default function Chat() {
       }],
     };
     
-    ws.send(JSON.stringify(message));
-    console.log('[前端] 发送消息:', messageText);
+    try {
+      currentWs.send(JSON.stringify(message));
+      console.log('[前端] 发送消息:', messageText);
+    } catch (err) {
+      console.error('[前端] 发送消息失败:', err);
+      notifications.show({
+        title: '发送失败',
+        message: '消息发送失败，请重试',
+        color: 'red',
+      });
+    }
     
     // 清空输入框
     setInputValue('');
@@ -833,7 +987,7 @@ export default function Chat() {
       <Group justify="space-between">
         <Title order={2}>音频播放器</Title>
         <Group gap="xs">
-          <Badge color={ws?.readyState === WebSocket.OPEN ? 'green' : 'red'}>
+          <Badge color={wsRef.current?.readyState === WebSocket.OPEN ? 'green' : 'red'}>
             {status}
           </Badge>
           {isPlaying && <Badge color="orange">播放中</Badge>}
@@ -966,13 +1120,13 @@ export default function Chat() {
             onChange={(e) => setInputValue(e.target.value)}
             onKeyPress={handleKeyPress}
             style={{ flex: 1 }}
-            disabled={!ws || ws.readyState !== WebSocket.OPEN}
+            disabled={!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN}
           />
           <ActionIcon
             size="lg"
             variant="filled"
             onClick={handleSendMessage}
-            disabled={!inputValue.trim() || !ws || ws.readyState !== WebSocket.OPEN}
+            disabled={!inputValue.trim() || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN}
           >
             <IconSend size={18} />
           </ActionIcon>

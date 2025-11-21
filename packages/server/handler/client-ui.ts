@@ -350,6 +350,30 @@ class ClientUIWebSocketHandler extends ConnectionHandler<Context> {
     
     // 接收前端消息并转发到上游
     async message(msg: any) {
+        // 处理心跳消息（不转发到上游，直接响应）
+        if (typeof msg === 'string') {
+            if (msg === 'ping' || msg.trim() === 'ping') {
+                try {
+                    this.send('pong');
+                    logger.debug('[前端WS] 收到心跳，已响应');
+                } catch (e) {
+                    logger.error('[前端WS] 发送心跳响应失败: %s', (e as Error).message);
+                }
+                return;
+            }
+        } else if (typeof msg === 'object' && msg !== null) {
+            if (msg.type === 'ping') {
+                try {
+                    this.send(JSON.stringify({ type: 'pong' }));
+                    logger.debug('[前端WS] 收到心跳（JSON），已响应');
+                } catch (e) {
+                    logger.error('[前端WS] 发送心跳响应失败: %s', (e as Error).message);
+                }
+                return;
+            }
+        }
+        
+        // 其他消息转发到上游
         const upstreamWs = getGlobalWsConnection();
         if (!upstreamWs || upstreamWs.readyState !== 1) {
             return;

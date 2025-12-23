@@ -3,8 +3,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ArmorMoney from './widgets/ArmorMoney';
 import BombStatus from './widgets/BombStatus';
+import EnemyTeam from './widgets/EnemyTeam';
 import FaceitStats from './widgets/FaceitStats';
 import HealthBar from './widgets/HealthBar';
+import MatchTeams from './widgets/MatchTeams';
+import MyTeam from './widgets/MyTeam';
 import PlayerInfo from './widgets/PlayerInfo';
 import PlayerStats from './widgets/PlayerStats';
 import RoundStats from './widgets/RoundStats';
@@ -21,6 +24,9 @@ const widgetMap: Record<string, React.ComponentType> = {
   stats: PlayerStats,
   round: RoundStats,
   faceit: FaceitStats,
+  matchteams: MatchTeams,
+  myteam: MyTeam,
+  enemyteam: EnemyTeam,
 };
 
 export default function Widget() {

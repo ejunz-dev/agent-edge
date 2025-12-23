@@ -165,10 +165,65 @@ class FaceitMatchHandler extends Handler<Context> {
     const apiKey = faceitConfig.apiKey || '';
     const playerId = faceitConfig.playerId || '';
 
+    // 如果没有 Faceit API Key，尝试使用 CS2 GSI 数据作为备选
     if (!apiKey) {
+      const cs2State = latestCs2State || {};
+      const allPlayers = cs2State.allplayers || {};
+      const map = cs2State.map || {};
+      
+      // 从 CS2 GSI 中提取所有玩家信息
+      const cs2Team1: any[] = [];
+      const cs2Team2: any[] = [];
+      
+      if (allPlayers && typeof allPlayers === 'object') {
+        Object.values(allPlayers).forEach((p: any) => {
+          if (!p || !p.name) return;
+          const playerData = {
+            id: p.steamid || p.name,
+            nickname: p.name,
+            avatar: null, // CS2 GSI 不提供头像
+            country: null,
+            elo: null, // CS2 GSI 不提供 ELO
+            level: null,
+            team: p.team || 'unknown',
+          };
+          
+          if (p.team === 'CT' || p.team === 'ct') {
+            cs2Team1.push(playerData);
+          } else if (p.team === 'T' || p.team === 't') {
+            cs2Team2.push(playerData);
+          }
+        });
+      }
+      
+      // 如果 CS2 GSI 有数据，返回它
+      if (cs2Team1.length > 0 || cs2Team2.length > 0) {
+        this.response.type = 'application/json';
+        this.response.body = {
+          ok: true,
+          match: {
+            id: 'cs2-gsi',
+            source: 'cs2-gsi',
+            teams: {
+              team1: {
+                id: 'CT',
+                name: map?.team_ct?.name || 'CT',
+                players: cs2Team1,
+              },
+              team2: {
+                id: 'T',
+                name: map?.team_t?.name || 'T',
+                players: cs2Team2,
+              },
+            },
+          },
+        };
+        return;
+      }
+      
       this.response.status = 400;
       this.response.type = 'application/json';
-      this.response.body = { ok: false, error: 'Faceit API Key 未配置' };
+      this.response.body = { ok: false, error: 'Faceit API Key 未配置，且 CS2 GSI 数据不可用' };
       return;
     }
 
@@ -236,6 +291,146 @@ class FaceitMatchHandler extends Handler<Context> {
       const isOngoing = !latestMatch.finished_at || latestMatch.finished_at > now;
 
       if (!isOngoing) {
+        // 如果没有正在进行的 Faceit 对局，尝试使用 CS2 GSI 数据并通过 Faceit API 搜索每个玩家
+        const cs2State = latestCs2State || {};
+        const allPlayers = cs2State.allplayers || {};
+        const map = cs2State.map || {};
+        
+        // 从 CS2 GSI 中提取所有玩家信息，并尝试通过 Faceit API 获取详细信息
+        const cs2Team1: any[] = [];
+        const cs2Team2: any[] = [];
+        
+        // 通过 Faceit API 搜索玩家信息的函数
+        const searchPlayerBySteamId = async (steamId: string): Promise<any | null> => {
+          if (!steamId || !apiKey) return null;
+          try {
+            const searchRes = await superagent
+              .get('https://open.faceit.com/data/v4/players')
+              .set('Authorization', `Bearer ${apiKey}`)
+              .query({ game: 'cs2', game_player_id: steamId });
+            
+            if (searchRes.body?.player_id) {
+              const playerId = searchRes.body.player_id;
+              // 获取玩家详细信息
+              const playerRes = await superagent
+                .get(`https://open.faceit.com/data/v4/players/${playerId}`)
+                .set('Authorization', `Bearer ${apiKey}`);
+              
+              // 获取玩家统计数据
+              let stats = {};
+              try {
+                const statsRes = await superagent
+                  .get(`https://open.faceit.com/data/v4/players/${playerId}/stats/cs2`)
+                  .set('Authorization', `Bearer ${apiKey}`);
+                stats = statsRes.body?.lifetime || {};
+              } catch (e) {
+                logger.debug('获取玩家统计失败: %s', (e as Error).message);
+              }
+              
+              return {
+                id: playerRes.body.player_id,
+                nickname: playerRes.body.nickname,
+                avatar: playerRes.body.avatar,
+                country: playerRes.body.country,
+                elo: playerRes.body.games?.cs2?.faceit_elo || 0,
+                level: playerRes.body.games?.cs2?.skill_level || 0,
+                stats: {
+                  winRate: stats['Win Rate %'] ? parseFloat(stats['Win Rate %']) : 0,
+                  avg: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+                  kd: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+                  adr: stats['Average Damage per Round'] ? parseFloat(stats['Average Damage per Round']) : 0,
+                  hsPercent: stats['Average Headshots %'] ? parseFloat(stats['Average Headshots %']) : 0,
+                  totalKills: stats['Total Kills'] || 0,
+                },
+              };
+            }
+          } catch (e) {
+            logger.debug('通过 Steam ID 搜索 Faceit 玩家失败: %s', (e as Error).message);
+          }
+          return null;
+        };
+        
+        if (allPlayers && typeof allPlayers === 'object') {
+          // 并行搜索所有玩家
+          const playerPromises: Promise<any>[] = [];
+          const playerMap = new Map<string, any>();
+          
+          Object.values(allPlayers).forEach((p: any) => {
+            if (!p || !p.name) return;
+            const steamId = p.steamid;
+            const team = p.team;
+            
+            if (steamId) {
+              const promise = searchPlayerBySteamId(steamId).then((faceitData) => {
+                const playerData = {
+                  id: faceitData?.id || steamId || p.name,
+                  nickname: faceitData?.nickname || p.name,
+                  avatar: faceitData?.avatar || null,
+                  country: faceitData?.country || null,
+                  elo: faceitData?.elo || null,
+                  level: faceitData?.level || null,
+                  stats: faceitData?.stats || {},
+                  team: team || 'unknown',
+                  steamid: steamId,
+                };
+                playerMap.set(steamId, { playerData, team });
+              });
+              playerPromises.push(promise);
+            } else {
+              // 没有 Steam ID，使用默认数据
+              const playerData = {
+                id: p.name,
+                nickname: p.name,
+                avatar: null,
+                country: null,
+                elo: null,
+                level: null,
+                stats: {},
+                team: team || 'unknown',
+                steamid: null,
+              };
+              playerMap.set(p.name, { playerData, team });
+            }
+          });
+          
+          // 等待所有搜索完成
+          await Promise.all(playerPromises);
+          
+          // 按队伍分类
+          playerMap.forEach(({ playerData, team }) => {
+            if (team === 'CT' || team === 'ct') {
+              cs2Team1.push(playerData);
+            } else if (team === 'T' || team === 't') {
+              cs2Team2.push(playerData);
+            }
+          });
+        }
+        
+        // 如果 CS2 GSI 有数据，返回它
+        if (cs2Team1.length > 0 || cs2Team2.length > 0) {
+          this.response.type = 'application/json';
+          this.response.body = {
+            ok: true,
+            match: {
+              id: 'cs2-gsi',
+              source: 'cs2-gsi',
+              teams: {
+                team1: {
+                  id: 'CT',
+                  name: map?.team_ct?.name || 'CT',
+                  players: cs2Team1,
+                },
+                team2: {
+                  id: 'T',
+                  name: map?.team_t?.name || 'T',
+                  players: cs2Team2,
+                },
+              },
+            },
+          };
+          return;
+        }
+        
         this.response.type = 'application/json';
         this.response.body = { ok: true, match: null, message: '没有正在进行的对局' };
         return;
@@ -253,12 +448,24 @@ class FaceitMatchHandler extends Handler<Context> {
       const team1Data = matchData.teams?.faction1 || matchData.teams?.team1 || {};
       const team2Data = matchData.teams?.faction2 || matchData.teams?.team2 || {};
 
-      // 获取每个玩家的详细信息
+      // 获取每个玩家的详细信息（包括统计数据）
       const getPlayerDetails = async (playerId: string) => {
         try {
           const playerRes = await superagent
             .get(`https://open.faceit.com/data/v4/players/${playerId}`)
             .set('Authorization', `Bearer ${apiKey}`);
+          
+          // 获取玩家统计数据
+          let stats = {};
+          try {
+            const statsRes = await superagent
+              .get(`https://open.faceit.com/data/v4/players/${playerId}/stats/cs2`)
+              .set('Authorization', `Bearer ${apiKey}`);
+            stats = statsRes.body?.lifetime || {};
+          } catch (e) {
+            logger.debug('获取玩家统计失败: %s', (e as Error).message);
+          }
+          
           return {
             id: playerRes.body.player_id,
             nickname: playerRes.body.nickname,
@@ -266,6 +473,14 @@ class FaceitMatchHandler extends Handler<Context> {
             country: playerRes.body.country,
             elo: playerRes.body.games?.cs2?.faceit_elo || 0,
             level: playerRes.body.games?.cs2?.skill_level || 0,
+            stats: {
+              winRate: stats['Win Rate %'] ? parseFloat(stats['Win Rate %']) : 0,
+              avg: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+              kd: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+              adr: stats['Average Damage per Round'] ? parseFloat(stats['Average Damage per Round']) : 0,
+              hsPercent: stats['Average Headshots %'] ? parseFloat(stats['Average Headshots %']) : 0,
+              totalKills: stats['Total Kills'] || 0,
+            },
           };
         } catch (e) {
           logger.debug('获取玩家详情失败: %s', (e as Error).message);
@@ -301,23 +516,168 @@ class FaceitMatchHandler extends Handler<Context> {
         ok: true,
         match: {
           id: matchId,
+          source: 'faceit',
           status: matchData.status,
           started_at: matchData.started_at,
           finished_at: matchData.finished_at,
           teams: {
             team1: {
               id: team1Data.team_id || team1Data.id,
+              name: team1Data.name || 'Team 1',
               players: team1Players,
             },
             team2: {
               id: team2Data.team_id || team2Data.id,
+              name: team2Data.name || 'Team 2',
               players: team2Players,
             },
           },
         },
       };
     } catch (e: any) {
-      logger.error('Faceit 对局 API 调用失败: %s', (e as Error).message);
+      logger.debug('Faceit 对局 API 调用失败，尝试使用 CS2 GSI 数据并通过 Faceit API 搜索: %s', (e as Error).message);
+      
+      // 如果 Faceit API 失败，尝试使用 CS2 GSI 数据并通过 Faceit API 搜索每个玩家
+      const cs2State = latestCs2State || {};
+      const allPlayers = cs2State.allplayers || {};
+      const map = cs2State.map || {};
+      
+      // 从 CS2 GSI 中提取所有玩家信息，并尝试通过 Faceit API 获取详细信息
+      const cs2Team1: any[] = [];
+      const cs2Team2: any[] = [];
+      
+      // 通过 Faceit API 搜索玩家信息的函数
+      const searchPlayerBySteamId = async (steamId: string): Promise<any | null> => {
+        if (!steamId || !apiKey) return null;
+        try {
+          const searchRes = await superagent
+            .get('https://open.faceit.com/data/v4/players')
+            .set('Authorization', `Bearer ${apiKey}`)
+            .query({ game: 'cs2', game_player_id: steamId });
+          
+          if (searchRes.body?.player_id) {
+            const playerId = searchRes.body.player_id;
+            // 获取玩家详细信息
+            const playerRes = await superagent
+              .get(`https://open.faceit.com/data/v4/players/${playerId}`)
+              .set('Authorization', `Bearer ${apiKey}`);
+            
+            // 获取玩家统计数据
+            let stats = {};
+            try {
+              const statsRes = await superagent
+                .get(`https://open.faceit.com/data/v4/players/${playerId}/stats/cs2`)
+                .set('Authorization', `Bearer ${apiKey}`);
+              stats = statsRes.body?.lifetime || {};
+            } catch (e) {
+              logger.debug('获取玩家统计失败: %s', (e as Error).message);
+            }
+            
+            return {
+              id: playerRes.body.player_id,
+              nickname: playerRes.body.nickname,
+              avatar: playerRes.body.avatar,
+              country: playerRes.body.country,
+              elo: playerRes.body.games?.cs2?.faceit_elo || 0,
+              level: playerRes.body.games?.cs2?.skill_level || 0,
+              stats: {
+                winRate: stats['Win Rate %'] ? parseFloat(stats['Win Rate %']) : 0,
+                avg: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+                kd: stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0,
+                adr: stats['Average Damage per Round'] ? parseFloat(stats['Average Damage per Round']) : 0,
+                hsPercent: stats['Average Headshots %'] ? parseFloat(stats['Average Headshots %']) : 0,
+                totalKills: stats['Total Kills'] || 0,
+              },
+            };
+          }
+        } catch (e) {
+          logger.debug('通过 Steam ID 搜索 Faceit 玩家失败: %s', (e as Error).message);
+        }
+        return null;
+      };
+      
+      if (allPlayers && typeof allPlayers === 'object') {
+        // 并行搜索所有玩家
+        const playerPromises: Promise<any>[] = [];
+        const playerMap = new Map<string, any>();
+        
+        Object.values(allPlayers).forEach((p: any) => {
+          if (!p || !p.name) return;
+          const steamId = p.steamid;
+          const team = p.team;
+          
+          if (steamId) {
+            const promise = searchPlayerBySteamId(steamId).then((faceitData) => {
+              const playerData = {
+                id: faceitData?.id || steamId || p.name,
+                nickname: faceitData?.nickname || p.name,
+                avatar: faceitData?.avatar || null,
+                country: faceitData?.country || null,
+                elo: faceitData?.elo || null,
+                level: faceitData?.level || null,
+                stats: faceitData?.stats || {},
+                team: team || 'unknown',
+                steamid: steamId,
+              };
+              playerMap.set(steamId, { playerData, team });
+            });
+            playerPromises.push(promise);
+          } else {
+            // 没有 Steam ID，使用默认数据
+            const playerData = {
+              id: p.name,
+              nickname: p.name,
+              avatar: null,
+              country: null,
+              elo: null,
+              level: null,
+              stats: {},
+              team: team || 'unknown',
+              steamid: null,
+            };
+            playerMap.set(p.name, { playerData, team });
+          }
+        });
+        
+        // 等待所有搜索完成
+        await Promise.all(playerPromises);
+        
+        // 按队伍分类
+        playerMap.forEach(({ playerData, team }) => {
+          if (team === 'CT' || team === 'ct') {
+            cs2Team1.push(playerData);
+          } else if (team === 'T' || team === 't') {
+            cs2Team2.push(playerData);
+          }
+        });
+      }
+      
+      // 如果 CS2 GSI 有数据，返回它
+      if (cs2Team1.length > 0 || cs2Team2.length > 0) {
+        this.response.type = 'application/json';
+        this.response.body = {
+          ok: true,
+          match: {
+            id: 'cs2-gsi',
+            source: 'cs2-gsi',
+            teams: {
+              team1: {
+                id: 'CT',
+                name: map?.team_ct?.name || 'CT',
+                players: cs2Team1,
+              },
+              team2: {
+                id: 'T',
+                name: map?.team_t?.name || 'T',
+                players: cs2Team2,
+              },
+            },
+          },
+        };
+        return;
+      }
+      
+      // 如果 CS2 GSI 也没有数据，返回错误
       this.response.status = 500;
       this.response.type = 'application/json';
       this.response.body = {

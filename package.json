@@ -7,6 +7,7 @@
     "packages/machine-setup/frontend",
     "packages/server/node/ui",
     "packages/server/client/ui",
+    "packages/server/projection/ui",
     "packages/provider-ui"
   ],
   "scripts": {
@@ -15,6 +16,7 @@
     "dev:proxy": "node -r ./register.js packages/server/index.ts --debug --proxy",
     "dev:provider": "node -r ./register.js packages/server/index.ts --debug --provider",
     "dev:node": "node -r ./register.js packages/server/index.ts --debug --node",
+    "dev:projection": "node -r ./register.js packages/server/index.ts --debug --projection",
     "test:voice": "node -r ./register.js packages/server/client/test-voice.ts",
     "lint": "eslint packages --ext js,ts,tsx,jsx",
     "build": "yarn build:ui && node -r ./register.js build.ts",

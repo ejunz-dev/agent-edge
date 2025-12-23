@@ -12,7 +12,12 @@ const isClient = process.argv.includes('--client');
 const isNode = process.argv.includes('--node');
 const isProxy = process.argv.includes('--proxy');
 const isProvider = process.argv.includes('--provider');
-const configPath = path.resolve(process.cwd(), `config.${isClient ? 'client' : isNode ? 'node' : isProvider ? 'provider' : 'server'}.yaml`);
+const isProjection = process.argv.includes('--projection');
+// projection 使用独立的 config.projection.yaml，但结构复用 serverSchema
+const configPath = path.resolve(
+    process.cwd(),
+    `config.${isClient ? 'client' : isNode ? 'node' : isProvider ? 'provider' : isProjection ? 'projection' : 'server'}.yaml`,
+);
 fs.ensureDirSync(path.resolve(process.cwd(), 'data'));
 
 // eslint-disable-next-line import/no-mutable-exports
@@ -106,11 +111,19 @@ tools:
     enabled: true
     description: '获取当前时间和日期信息'
   get_server_status:
-    enabled: true
-    description: '获取服务器状态信息，包括 CPU、内存、系统信息等'
+  enabled: true
+  description: '获取服务器状态信息，包括 CPU、内存、系统信息等'
 `;
-        fs.writeFileSync(configPath, isClient ? clientConfigDefault : isNode ? nodeConfigDefault : isProvider ? providerConfigDefault : serverConfigDefault);
-        logger.error('Config file generated, please fill in the config.yaml');
+        // projection 目前沿用 server 配置结构，但使用独立文件 config.projection.yaml
+        const configContent = isClient
+            ? clientConfigDefault
+            : isNode
+                ? nodeConfigDefault
+                : isProvider
+                    ? providerConfigDefault
+                    : serverConfigDefault;
+        fs.writeFileSync(configPath, configContent);
+        logger.error(`Config file generated, please fill in ${path.basename(configPath)}`);
         resolve();
     })());
     throw new Error('no-config');

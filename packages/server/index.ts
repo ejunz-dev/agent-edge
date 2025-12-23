@@ -36,10 +36,12 @@ async function applyServer(ctx: Context) {
             c.plugin(require('./handler/edge')),
             // c.plugin(require('./handler/client')), // 注释掉 edge2client
             c.plugin(require('./handler/asr-proxy')),
-                c.plugin(require('./handler/zigbee2mqtt')),
+            c.plugin(require('./handler/zigbee2mqtt')),
             c.plugin(require('./handler/audio-player')),
             c.plugin(require('./handler/audio-cache')),
             c.plugin(require('./handler/node')),
+            // CS2 Projection 后端 + UI
+            c.plugin(require('./handler/projection-ui')),
         ]);
         
         c.server.listen();
@@ -121,12 +123,28 @@ async function applyProvider(ctx: Context) {
     });
 }
 
+// Projection 模式：专门用于 CS2 GSI 投影（独立启动方式，类似 --node）
+async function applyProjection(ctx: Context) {
+    // 仅需要 WebService + Projection UI/后端
+    await ctx.plugin(require('./service/server'));
+    await ctx.inject(['server'], async (c) => {
+        await Promise.all([
+            c.plugin(require('./handler/projection-ui')),
+        ]);
+
+        c.server.listen();
+    });
+}
+
 async function apply(ctx) {
     (global as any).__cordis_ctx = ctx;
     if (process.argv.includes('--client')) {
         await applyClient(ctx);
     } else if (process.argv.includes('--node')) {
         applyNode(ctx);
+    } else if (process.argv.includes('--projection')) {
+        // Projection 模式：不需要 DBService，仅启动 WebService + projection handler
+        await applyProjection(ctx);
     } else if (process.argv.includes('--proxy')) {
         // Proxy 模式：只启动服务器，不加载其他服务
         ctx.plugin(DBService);

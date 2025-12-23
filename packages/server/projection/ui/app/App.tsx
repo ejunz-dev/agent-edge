@@ -8,6 +8,7 @@ import Dashboard from './pages/Dashboard';
 import Live from './pages/Live';
 import Config from './pages/Config';
 import Widget from './pages/Widget';
+import MatchTeams from './pages/widgets/MatchTeams';
 
 function DefaultLayout() {
   return (
@@ -45,6 +46,8 @@ export default function App() {
         {/* OBS 组件路由（无 Header，背景透明） */}
         <Route path="/widget/:name" element={<Widget />} />
       </Routes>
+      {/* 全局对局信息组件（在 freeze 时显示） */}
+      <MatchTeams />
     </HashRouter>
   );
 }

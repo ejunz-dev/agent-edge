@@ -155,6 +155,179 @@ class ProjectionCs2GSIHandler extends Handler<Context> {
   }
 }
 
+// Faceit API Handler - 获取当前对局信息（双方队伍）
+class FaceitMatchHandler extends Handler<Context> {
+  noCheckPermView = true;
+  allowCors = true;
+
+  async get() {
+    const faceitConfig = (config as any).faceit || {};
+    const apiKey = faceitConfig.apiKey || '';
+    const playerId = faceitConfig.playerId || '';
+
+    if (!apiKey) {
+      this.response.status = 400;
+      this.response.type = 'application/json';
+      this.response.body = { ok: false, error: 'Faceit API Key 未配置' };
+      return;
+    }
+
+    try {
+      // 获取目标 Player ID（复用之前的逻辑）
+      let targetPlayerId = playerId;
+      
+      if (!targetPlayerId) {
+        const nickname = this.request.query.nickname as string || '';
+        if (nickname) {
+          try {
+            const searchRes = await superagent
+              .get('https://open.faceit.com/data/v4/players')
+              .set('Authorization', `Bearer ${apiKey}`)
+              .query({ nickname });
+            if (searchRes.body?.player_id) {
+              targetPlayerId = searchRes.body.player_id;
+            }
+          } catch (e) {
+            logger.debug('通过用户名获取 Player ID 失败: %s', (e as Error).message);
+          }
+        }
+        
+        if (!targetPlayerId && latestCs2State?.player?.steamid) {
+          try {
+            const steamId = latestCs2State.player.steamid;
+            const searchRes = await superagent
+              .get('https://open.faceit.com/data/v4/players')
+              .set('Authorization', `Bearer ${apiKey}`)
+              .query({ game: 'cs2', game_player_id: steamId });
+            if (searchRes.body?.player_id) {
+              targetPlayerId = searchRes.body.player_id;
+            }
+          } catch (e) {
+            logger.debug('通过 Steam ID 获取 Player ID 失败: %s', (e as Error).message);
+          }
+        }
+      }
+
+      if (!targetPlayerId) {
+        this.response.status = 400;
+        this.response.type = 'application/json';
+        this.response.body = { ok: false, error: '未找到 Faceit Player ID' };
+        return;
+      }
+
+      // 获取当前对局（正在进行的比赛）
+      // 先获取最近比赛，检查是否有正在进行的
+      const matchesRes = await superagent
+        .get(`https://open.faceit.com/data/v4/players/${targetPlayerId}/history`)
+        .set('Authorization', `Bearer ${apiKey}`)
+        .query({ game: 'cs2', limit: 1 });
+
+      const matches = matchesRes.body?.items || [];
+      if (matches.length === 0) {
+        this.response.type = 'application/json';
+        this.response.body = { ok: true, match: null, message: '没有找到当前对局' };
+        return;
+      }
+
+      const latestMatch = matches[0];
+      
+      // 检查比赛是否正在进行（finished_at 为 null 或未来时间）
+      const now = Math.floor(Date.now() / 1000);
+      const isOngoing = !latestMatch.finished_at || latestMatch.finished_at > now;
+
+      if (!isOngoing) {
+        this.response.type = 'application/json';
+        this.response.body = { ok: true, match: null, message: '没有正在进行的对局' };
+        return;
+      }
+
+      // 获取比赛详细信息
+      const matchId = latestMatch.match_id;
+      const matchRes = await superagent
+        .get(`https://open.faceit.com/data/v4/matches/${matchId}`)
+        .set('Authorization', `Bearer ${apiKey}`);
+
+      const matchData = matchRes.body;
+
+      // 解析队伍信息（Faceit API 可能使用 teams.faction1/faction2 或 teams.team1/team2）
+      const team1Data = matchData.teams?.faction1 || matchData.teams?.team1 || {};
+      const team2Data = matchData.teams?.faction2 || matchData.teams?.team2 || {};
+
+      // 获取每个玩家的详细信息
+      const getPlayerDetails = async (playerId: string) => {
+        try {
+          const playerRes = await superagent
+            .get(`https://open.faceit.com/data/v4/players/${playerId}`)
+            .set('Authorization', `Bearer ${apiKey}`);
+          return {
+            id: playerRes.body.player_id,
+            nickname: playerRes.body.nickname,
+            avatar: playerRes.body.avatar,
+            country: playerRes.body.country,
+            elo: playerRes.body.games?.cs2?.faceit_elo || 0,
+            level: playerRes.body.games?.cs2?.skill_level || 0,
+          };
+        } catch (e) {
+          logger.debug('获取玩家详情失败: %s', (e as Error).message);
+          return null;
+        }
+      };
+
+      // 获取双方队伍玩家详情
+      const team1Players = [];
+      const team2Players = [];
+
+      const roster1 = team1Data.roster || team1Data.players || [];
+      const roster2 = team2Data.roster || team2Data.players || [];
+
+      for (const player of roster1) {
+        const playerId = player.player_id || player.id;
+        if (playerId) {
+          const details = await getPlayerDetails(playerId);
+          if (details) team1Players.push(details);
+        }
+      }
+
+      for (const player of roster2) {
+        const playerId = player.player_id || player.id;
+        if (playerId) {
+          const details = await getPlayerDetails(playerId);
+          if (details) team2Players.push(details);
+        }
+      }
+
+      this.response.type = 'application/json';
+      this.response.body = {
+        ok: true,
+        match: {
+          id: matchId,
+          status: matchData.status,
+          started_at: matchData.started_at,
+          finished_at: matchData.finished_at,
+          teams: {
+            team1: {
+              id: team1Data.team_id || team1Data.id,
+              players: team1Players,
+            },
+            team2: {
+              id: team2Data.team_id || team2Data.id,
+              players: team2Players,
+            },
+          },
+        },
+      };
+    } catch (e: any) {
+      logger.error('Faceit 对局 API 调用失败: %s', (e as Error).message);
+      this.response.status = 500;
+      this.response.type = 'application/json';
+      this.response.body = {
+        ok: false,
+        error: e.response?.body?.errors?.[0]?.message || (e as Error).message,
+      };
+    }
+  }
+}
+
 // Faceit API Handler - 获取玩家统计数据
 class FaceitStatsHandler extends Handler<Context> {
   noCheckPermView = true;
@@ -361,6 +534,7 @@ export async function apply(ctx: Context) {
   ctx.Route('projection-cs2-gsi-alt', '/projection/cs2-gsi', ProjectionCs2GSIHandler);
   // Faceit API
   ctx.Route('faceit-stats', '/api/projection/faceit', FaceitStatsHandler);
+  ctx.Route('faceit-match', '/api/projection/faceit-match', FaceitMatchHandler);
   ctx.Connection('projection-ws', '/projection-ws', ProjectionWebSocketHandler);
 }
 

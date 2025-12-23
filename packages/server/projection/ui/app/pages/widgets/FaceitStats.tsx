@@ -2,6 +2,7 @@ import { Group, Paper, Stack, Text, Title, Avatar, Badge, Box } from '@mantine/c
 import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useCs2State } from '../../hooks/useCs2State';
 
 function StatItem({ label, value, color = 'white' }: { label: string; value: React.ReactNode; color?: string }) {
   return (
@@ -19,28 +20,13 @@ function StatItem({ label, value, color = 'white' }: { label: string; value: Rea
 export default function FaceitStats() {
   const [searchParams] = useSearchParams();
   const nickname = searchParams.get('nickname') || '';
-  const [showStats, setShowStats] = useState(false);
+  const { state } = useCs2State();
+  const round = state?.round || {};
+  const roundPhase = round?.phase || '';
 
-  // 每1分钟展开，展开后5秒折叠
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setShowStats(true);
-      setTimeout(() => {
-        setShowStats(false);
-      }, 5000); // 5秒后折叠
-    }, 60000); // 每1分钟（60秒）执行一次
-
-    // 首次立即展开一次
-    setShowStats(true);
-    const firstTimeout = setTimeout(() => {
-      setShowStats(false);
-    }, 5000);
-
-    return () => {
-      clearInterval(interval);
-      clearTimeout(firstTimeout);
-    };
-  }, []);
+  // 根据 round.phase 控制显示/隐藏
+  // freezetime = 冻结时间（回合开始前的准备时间）
+  const shouldShow = roundPhase === 'freezetime' || roundPhase === 'warmup';
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['faceit-stats', nickname],
@@ -230,8 +216,8 @@ export default function FaceitStats() {
         {/* 底部统计数据 - 渐进式展开/折叠 */}
         <Box
           style={{
-            maxHeight: showStats ? 200 : 0,
-            opacity: showStats ? 1 : 0,
+            maxHeight: shouldShow ? 200 : 0,
+            opacity: shouldShow ? 1 : 0,
             overflow: 'hidden',
             transition: 'max-height 0.5s ease-in-out, opacity 0.5s ease-in-out',
           }}

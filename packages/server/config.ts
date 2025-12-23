@@ -71,6 +71,14 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 #   password: ''
 #   autoStart: false
 #   adapter: '/dev/ttyUSB0'
+# Faceit API 配置（可选，用于显示 Faceit 统计数据）
+# faceit:
+#   apiKey: '' # Faceit API Key，在 https://developers.faceit.com/ 申请
+#   playerId: '' # Faceit Player ID（可选，如果不填则从 Steam ID 自动获取）
+# Faceit API 配置（可选，用于显示 Faceit 统计数据）
+# faceit:
+#   apiKey: '' # Faceit API Key，在 https://developers.faceit.com/ 申请
+#   playerId: '' # Faceit Player ID（可选，如果不填则从 Steam ID 自动获取）
 `;
         const nodeConfigDefault = `\
 # 控制节点（Node）配置，仅负责 Zigbee2MQTT 管理与设备控制桥接
@@ -276,6 +284,14 @@ const serverSchema = Schema.object({
         password: '',
         autoStart: false,
         adapter: '/dev/ttyUSB0',
+    }),
+    // Faceit API 配置
+    faceit: Schema.object({
+        apiKey: Schema.string().default(''),
+        playerId: Schema.string().default(''),
+    }).default({
+        apiKey: '',
+        playerId: '',
     }),
     // 插件配置
     plugins: Schema.object({

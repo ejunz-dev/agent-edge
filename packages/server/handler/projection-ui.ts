@@ -2,6 +2,7 @@
 import { Context } from 'cordis';
 import { Handler, ConnectionHandler } from '@ejunz/framework';
 import path from 'node:path';
+import superagent from 'superagent';
 import { fs, randomstring, Logger } from '../utils';
 import { config } from '../config';
 
@@ -154,6 +155,160 @@ class ProjectionCs2GSIHandler extends Handler<Context> {
   }
 }
 
+// Faceit API Handler - 获取玩家统计数据
+class FaceitStatsHandler extends Handler<Context> {
+  noCheckPermView = true;
+  allowCors = true;
+
+  async get() {
+    const faceitConfig = (config as any).faceit || {};
+    const apiKey = faceitConfig.apiKey || '';
+    const playerId = faceitConfig.playerId || '';
+
+    if (!apiKey) {
+      this.response.status = 400;
+      this.response.type = 'application/json';
+      this.response.body = { ok: false, error: 'Faceit API Key 未配置' };
+      return;
+    }
+
+    try {
+      // 如果没有指定 playerId，尝试多种方式获取
+      let targetPlayerId = playerId;
+      
+      if (!targetPlayerId) {
+        // 方式1: 尝试通过用户名查找（从配置或查询参数）
+        const nickname = this.request.query.nickname as string || '';
+        if (nickname) {
+          try {
+            const searchRes = await superagent
+              .get('https://open.faceit.com/data/v4/players')
+              .set('Authorization', `Bearer ${apiKey}`)
+              .query({ nickname });
+            
+            if (searchRes.body?.player_id) {
+              targetPlayerId = searchRes.body.player_id;
+              logger.debug('通过用户名找到 Player ID: %s', targetPlayerId);
+            }
+          } catch (e) {
+            logger.debug('通过用户名获取 Faceit Player ID 失败: %s', (e as Error).message);
+          }
+        }
+        
+        // 方式2: 尝试从 CS2 GSI 数据中获取 Steam ID
+        if (!targetPlayerId && latestCs2State?.player?.steamid) {
+          try {
+            const steamId = latestCs2State.player.steamid;
+            const searchRes = await superagent
+              .get('https://open.faceit.com/data/v4/players')
+              .set('Authorization', `Bearer ${apiKey}`)
+              .query({ game: 'cs2', game_player_id: steamId });
+            
+            if (searchRes.body?.player_id) {
+              targetPlayerId = searchRes.body.player_id;
+              logger.debug('通过 Steam ID 找到 Player ID: %s', targetPlayerId);
+            }
+          } catch (e) {
+            logger.debug('通过 Steam ID 获取 Faceit Player ID 失败: %s', (e as Error).message);
+          }
+        }
+      }
+
+      if (!targetPlayerId) {
+        this.response.status = 400;
+        this.response.type = 'application/json';
+        this.response.body = { 
+          ok: false, 
+          error: '未找到 Faceit Player ID。请在配置中设置 faceit.playerId，或在 URL 中添加 ?nickname=你的用户名' 
+        };
+        return;
+      }
+
+      // 获取玩家基本信息
+      const playerRes = await superagent
+        .get(`https://open.faceit.com/data/v4/players/${targetPlayerId}`)
+        .set('Authorization', `Bearer ${apiKey}`);
+
+      // 获取 CS2 游戏统计
+      const statsRes = await superagent
+        .get(`https://open.faceit.com/data/v4/players/${targetPlayerId}/stats/cs2`)
+        .set('Authorization', `Bearer ${apiKey}`);
+
+      // 获取最近比赛（获取更多以计算今日数据）
+      const matchesRes = await superagent
+        .get(`https://open.faceit.com/data/v4/players/${targetPlayerId}/history`)
+        .set('Authorization', `Bearer ${apiKey}`)
+        .query({ game: 'cs2', limit: 20 }); // 获取最近20场比赛
+
+      const playerData = playerRes.body;
+      const statsData = statsRes.body;
+      const matchesData = matchesRes.body;
+
+      // 计算今日数据
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayTimestamp = today.getTime();
+
+      let todayWins = 0;
+      let todayLosses = 0;
+      let todayEloChange = 0;
+
+      const matches = matchesData.items || [];
+      for (const match of matches) {
+        const matchDate = new Date(match.finished_at * 1000);
+        if (matchDate >= today) {
+          const isWin = match.results?.winner === targetPlayerId;
+          if (isWin) {
+            todayWins++;
+          } else {
+            todayLosses++;
+          }
+          // 计算 ELO 变化（从 match 数据中获取）
+          if (match.elo && match.elo_before) {
+            const eloChange = match.elo - match.elo_before;
+            todayEloChange += eloChange;
+          }
+        } else {
+          break; // 已经过了今天，不需要继续
+        }
+      }
+
+      const currentElo = playerData.games?.cs2?.faceit_elo || 0;
+      const currentLevel = playerData.games?.cs2?.skill_level || 0;
+
+      this.response.type = 'application/json';
+      this.response.body = {
+        ok: true,
+        player: {
+          id: playerData.player_id,
+          nickname: playerData.nickname,
+          avatar: playerData.avatar,
+          country: playerData.country,
+          // ELO 和等级
+          games: playerData.games?.cs2 || {},
+          elo: currentElo,
+          level: currentLevel,
+        },
+        stats: statsData.lifetime || {},
+        lastMatch: matches[0] || null,
+        today: {
+          wins: todayWins,
+          losses: todayLosses,
+          eloChange: todayEloChange,
+        },
+      };
+    } catch (e: any) {
+      logger.error('Faceit API 调用失败: %s', (e as Error).message);
+      this.response.status = 500;
+      this.response.type = 'application/json';
+      this.response.body = {
+        ok: false,
+        error: e.response?.body?.errors?.[0]?.message || (e as Error).message,
+      };
+    }
+  }
+}
+
 // 前端 Overlay WebSocket，用于实时推送 GSI 状态给浏览器（OBS 场景里加载）
 class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
   noCheckPermView = true;
@@ -204,6 +359,8 @@ export async function apply(ctx: Context) {
   ctx.Route('projection-cs2-gsi', '/api/projection/cs2-gsi', ProjectionCs2GSIHandler);
   ctx.Route('projection-cs2-gsi-short', '/cs2-gsi', ProjectionCs2GSIHandler);
   ctx.Route('projection-cs2-gsi-alt', '/projection/cs2-gsi', ProjectionCs2GSIHandler);
+  // Faceit API
+  ctx.Route('faceit-stats', '/api/projection/faceit', FaceitStatsHandler);
   ctx.Connection('projection-ws', '/projection-ws', ProjectionWebSocketHandler);
 }
 

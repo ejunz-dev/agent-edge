@@ -3,8 +3,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import ArmorMoney from './widgets/ArmorMoney';
 import BombStatus from './widgets/BombStatus';
+import FaceitStats from './widgets/FaceitStats';
 import HealthBar from './widgets/HealthBar';
 import PlayerInfo from './widgets/PlayerInfo';
+import PlayerStats from './widgets/PlayerStats';
+import RoundStats from './widgets/RoundStats';
 import Score from './widgets/Score';
 import Weapons from './widgets/Weapons';
 
@@ -15,6 +18,9 @@ const widgetMap: Record<string, React.ComponentType> = {
   score: Score,
   bomb: BombStatus,
   weapons: Weapons,
+  stats: PlayerStats,
+  round: RoundStats,
+  faceit: FaceitStats,
 };
 
 export default function Widget() {

@@ -127,13 +127,82 @@ async function applyProvider(ctx: Context) {
 async function applyProjection(ctx: Context) {
     // 仅需要 WebService + Projection UI/后端
     await ctx.plugin(require('./service/server'));
+    
+    // 启动上游连接（不启动语音输入）
+    const { startConnecting } = require('./projection/client');
+    const stopConnecting = startConnecting(ctx);
+    
+    // 保存 server 引用以便关闭
+    let serverInstance: any = null;
+    
     await ctx.inject(['server'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/projection-ui')),
         ]);
 
         c.server.listen();
+        serverInstance = c.server;
     });
+    
+    // 清理函数（在进程退出时调用）
+    let isShuttingDown = false;
+    const cleanup = () => {
+        if (isShuttingDown) return;
+        isShuttingDown = true;
+        
+        try {
+            if (stopConnecting) stopConnecting();
+        } catch (e) {
+            logger.error('清理上游连接失败: %s', (e as Error).message);
+        }
+        
+        // 关闭服务器
+        try {
+            if (serverInstance) {
+                serverInstance.close(() => {
+                    logger.info('服务器已关闭');
+                });
+            }
+        } catch (e) {
+            logger.error('关闭服务器失败: %s', (e as Error).message);
+        }
+    };
+    
+    // 注册信号处理器
+    const handleShutdown = (signal: string) => {
+        logger.info('收到 %s 信号，正在关闭...', signal);
+        cleanup();
+        // 延迟退出，给清理操作时间
+        setTimeout(() => {
+            process.exit(0);
+        }, 1000);
+    };
+    
+    process.on('SIGINT', () => handleShutdown('SIGINT'));
+    process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+    process.on('exit', cleanup);
+    
+    // Windows 上的特殊处理
+    if (process.platform === 'win32') {
+        // Windows 上监听 readline 接口（用于 Ctrl+C）
+        try {
+            const readline = require('readline');
+            const rl = readline.createInterface({
+                input: process.stdin,
+                output: process.stdout,
+            });
+            
+            rl.on('SIGINT', () => {
+                logger.info('收到 Ctrl+C，正在关闭...');
+                handleShutdown('SIGINT');
+            });
+            
+            // 保存 rl 引用以便清理
+            (global as any).__projection_rl = rl;
+        } catch (e) {
+            logger.debug('Windows readline 初始化失败: %s', (e as Error).message);
+        }
+    }
 }
 
 async function apply(ctx) {

@@ -1,59 +1,16 @@
 import { useEffect, useState } from 'react';
+import { useProjectionMessage, useProjectionWebSocket } from './useProjectionWebSocket';
 
 type Cs2State = any;
 
 export function useCs2State() {
   const [state, setState] = useState<Cs2State | null>(null);
-  const [connected, setConnected] = useState(false);
+  const { connected } = useProjectionWebSocket();
 
-  // WebSocket 实时连接
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/projection-ws`;
-
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-
-    const connect = () => {
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        return;
-      }
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        setConnected(true);
-      };
-
-      ws.onclose = () => {
-        setConnected(false);
-        if (reconnectTimer) window.clearTimeout(reconnectTimer);
-        reconnectTimer = window.setTimeout(connect, 2000);
-      };
-
-      ws.onerror = () => {
-        setConnected(false);
-      };
-
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'state') {
-            setState(msg.data || null);
-          }
-        } catch {
-          // ignore
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      if (ws) ws.close();
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-    };
-  }, []);
+  // 使用共享的 WebSocket 连接监听 state 消息
+  useProjectionMessage('state', (data: any) => {
+    setState(data || null);
+  });
 
   // 初次加载时通过 REST 拉一次
   useEffect(() => {

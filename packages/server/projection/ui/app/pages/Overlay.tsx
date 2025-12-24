@@ -14,6 +14,7 @@ import {
   IconSword, IconShield, IconClockHour4, IconBomb,
 } from '@tabler/icons-react';
 import React, { useEffect, useState } from 'react';
+import { useProjectionMessage, useProjectionWebSocket } from '../hooks/useProjectionWebSocket';
 
 type Cs2State = any;
 
@@ -32,59 +33,15 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
 
 export default function Overlay() {
   const [state, setState] = useState<Cs2State | null>(null);
-  const [connected, setConnected] = useState(false);
+  const { connected } = useProjectionWebSocket();
   const [bombFlashOn, setBombFlashOn] = useState(false);
   const [bombSecondsLeft, setBombSecondsLeft] = useState<number | null>(null);
   const [bombPlantedAt, setBombPlantedAt] = useState<number | null>(null);
 
-  // WebSocket 实时连接
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/projection-ws`;
-
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-
-    const connect = () => {
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
-        return;
-      }
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        setConnected(true);
-      };
-
-      ws.onclose = () => {
-        setConnected(false);
-        if (reconnectTimer) window.clearTimeout(reconnectTimer);
-        reconnectTimer = window.setTimeout(connect, 2000);
-      };
-
-      ws.onerror = () => {
-        setConnected(false);
-      };
-
-      ws.onmessage = (ev) => {
-        try {
-          const msg = JSON.parse(ev.data);
-          if (msg.type === 'state') {
-            setState(msg.data || null);
-          }
-        } catch {
-          // ignore
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      if (ws) ws.close();
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-    };
-  }, []);
+  // 使用共享的 WebSocket 连接监听 state 消息
+  useProjectionMessage('state', (data: any) => {
+    setState(data || null);
+  });
 
   // 初次加载时通过 REST 拉一次（避免没有推送时界面是空的）
   useEffect(() => {

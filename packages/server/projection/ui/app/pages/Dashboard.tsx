@@ -5,7 +5,8 @@ import {
   IconGauge, IconWifi, IconWorld, IconRadar,
 } from '@tabler/icons-react';
 import { useQuery } from '@tanstack/react-query';
-import React, { useEffect, useState } from 'react';
+import React from 'react';
+import { useProjectionWebSocket } from '../hooks/useProjectionWebSocket';
 
 function StatsCard({ title, value, Icon, color = 'blue' }) {
   return (
@@ -27,48 +28,9 @@ function StatsCard({ title, value, Icon, color = 'blue' }) {
 }
 
 export default function Dashboard() {
-  const [wsStatus, setWsStatus] = useState<'connected' | 'disconnected' | 'connecting'>('disconnected');
-
-  // WebSocket 状态（连到 projection 自己的 /projection-ws）
-  useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/projection-ws`;
-
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-
-    const connect = () => {
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
-      setWsStatus('connecting');
-      ws = new WebSocket(wsUrl);
-
-      ws.onopen = () => {
-        setWsStatus('connected');
-        if (reconnectTimer) {
-          window.clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-      };
-
-      ws.onclose = () => {
-        setWsStatus('disconnected');
-        reconnectTimer = window.setTimeout(connect, 3000);
-      };
-
-      ws.onerror = () => {
-        setWsStatus('disconnected');
-      };
-    };
-
-    connect();
-
-    return () => {
-      if (ws) ws.close();
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-    };
-  }, []);
+  // 使用共享的 WebSocket 连接
+  const { connected } = useProjectionWebSocket();
+  const wsStatus = connected ? 'connected' : 'disconnected';
 
   // 基本信息（来自 /api/projection/info）
   const { data: info } = useQuery({
@@ -84,9 +46,9 @@ export default function Dashboard() {
       <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} m="lg">
         <StatsCard
           title="WebSocket 连接"
-          value={wsStatus === 'connected' ? '已连接' : wsStatus === 'connecting' ? '连接中' : '未连接'}
+          value={wsStatus === 'connected' ? '已连接' : '未连接'}
           Icon={IconWifi}
-          color={wsStatus === 'connected' ? 'green' : wsStatus === 'connecting' ? 'yellow' : 'red'}
+          color={wsStatus === 'connected' ? 'green' : 'red'}
         />
         <StatsCard
           title="运行模式"

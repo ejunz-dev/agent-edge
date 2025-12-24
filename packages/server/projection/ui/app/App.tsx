@@ -7,6 +7,7 @@ import { Header } from './components/Header';
 import Dashboard from './pages/Dashboard';
 import Live from './pages/Live';
 import Config from './pages/Config';
+import Chat from './pages/Chat';
 import Widget from './pages/Widget';
 import MatchTeams from './pages/widgets/MatchTeams';
 
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="/" element={<DefaultLayout />}>
           <Route index element={<Dashboard />} />
           <Route path="live" element={<Live />} />
+          <Route path="chat" element={<Chat />} />
           <Route path="config" element={<Config />} />
         </Route>
         {/* OBS 组件路由（无 Header，背景透明） */}

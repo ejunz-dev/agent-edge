@@ -1,6 +1,7 @@
 import { Box } from '@mantine/core';
 import React, { useEffect, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
+import AgentStream from './widgets/AgentStream';
 import ArmorMoney from './widgets/ArmorMoney';
 import BombStatus from './widgets/BombStatus';
 import EnemyTeam from './widgets/EnemyTeam';
@@ -13,6 +14,7 @@ import PlayerStats from './widgets/PlayerStats';
 import RoundStats from './widgets/RoundStats';
 import Score from './widgets/Score';
 import Weapons from './widgets/Weapons';
+import EmojiDisplay from './widgets/EmojiDisplay';
 
 const widgetMap: Record<string, React.ComponentType> = {
   player: PlayerInfo,
@@ -27,6 +29,8 @@ const widgetMap: Record<string, React.ComponentType> = {
   matchteams: MatchTeams,
   myteam: MyTeam,
   enemyteam: EnemyTeam,
+  agentstream: AgentStream,
+  emoji: EmojiDisplay,
 };
 
 export default function Widget() {

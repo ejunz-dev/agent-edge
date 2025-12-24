@@ -39,7 +39,10 @@ host: '' # 例如 edge.example.com:5283 或 10.0.0.5:5283
 # seatFile: /home/icpc/Desktop/seats.txt
 # customKeyfile: 
 # edgeUpstream: '' # e.g. ws://host:port/edge/conn
-# server: 
+# 上游服务器连接配置（用于 projection 模式连接远程 agent）
+# server: '' # 上游服务器地址，例如 'beta.ejunz.com' 或 'wss://beta.ejunz.com/edge/conn'
+# domainId: '' # 域 ID（从服务器管理界面获取）
+# wsToken: '' # WebSocket 连接令牌（从服务器管理界面生成）
 # token: 
 # username: 
 # password: 
@@ -141,6 +144,26 @@ const serverSchema = Schema.object({
     // 为最简配置而精简，仅保留 host 与必要默认项
     host: Schema.string().default(''),
     edgeUpstream: Schema.string().default(''),
+    // 上游服务器连接配置（用于 projection 模式连接远程 agent）
+    server: Schema.transform(String, (i) => {
+        if (!i) return '';
+        // 如果是完整的 WebSocket URL（包含路径或查询参数），不添加斜杠
+        if (/^wss?:\/\//i.test(i)) {
+            try {
+                const url = new URL(i);
+                // 如果已经有路径（不只是根路径）或查询参数，直接返回
+                if ((url.pathname && url.pathname !== '/') || url.search) {
+                    return i;
+                }
+            } catch {
+                // URL 解析失败，直接返回
+                return i;
+            }
+        }
+        return i;
+    }).default(''),
+    domainId: Schema.string().default(''), // 域 ID（从服务器管理界面获取）
+    wsToken: Schema.string().default(''), // WebSocket 连接令牌（从服务器管理界面生成）
     // 保留以下默认项以兼容日志与现有代码（无需在配置中填写）
     port: Schema.number().default(5283),
     xhost: Schema.string().default('x-forwarded-host'),

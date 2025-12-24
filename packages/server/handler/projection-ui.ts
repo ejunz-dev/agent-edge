@@ -5,6 +5,7 @@ import path from 'node:path';
 import superagent from 'superagent';
 import { fs, randomstring, Logger } from '../utils';
 import { config } from '../config';
+import { sendRoundInfo } from '../projection/client';
 
 const logger = new Logger('projection-ui');
 const randomHash = randomstring(8).toLowerCase();
@@ -12,6 +13,8 @@ const randomHash = randomstring(8).toLowerCase();
 // 当前最新的 CS2 GSI 状态（进程内内存存储）
 let latestCs2State: any = null;
 let latestCs2UpdateAt: number | null = null;
+let lastRoundNumber: number | null = null;
+let lastRoundPhase: string | null = null;
 
 // 维护所有前端 WebSocket 连接，用于推送实时数据
 const projectionConnections = new Set<ConnectionHandler<Context>>();
@@ -74,6 +77,51 @@ class ProjectionUIStaticHandler extends Handler<Context> {
   }
 }
 
+// 提供表情包图片文件
+class ProjectionImageHandler extends Handler<Context> {
+  noCheckPermView = true;
+  async get() {
+    const imageName = this.request.params.name as string;
+    if (!imageName) {
+      this.response.status = 404;
+      this.response.body = { error: 'Image name required' };
+      return;
+    }
+
+    // 安全检查：只允许 PNG 文件，防止路径遍历
+    if (!imageName.endsWith('.png') || imageName.includes('..') || imageName.includes('/')) {
+      this.response.status = 403;
+      this.response.body = { error: 'Invalid image name' };
+      return;
+    }
+
+    try {
+      const imagePath = path.resolve(__dirname, '../projection/images', imageName);
+      
+      // 再次安全检查：确保文件在 images 目录内
+      const imagesDir = path.resolve(__dirname, '../projection/images');
+      if (!imagePath.startsWith(imagesDir)) {
+        this.response.status = 403;
+        this.response.body = { error: 'Invalid image path' };
+        return;
+      }
+
+      if (fs.existsSync(imagePath)) {
+        this.response.type = 'image/png';
+        this.response.addHeader('Cache-Control', 'public, max-age=86400');
+        this.response.body = fs.readFileSync(imagePath);
+      } else {
+        this.response.status = 404;
+        this.response.body = { error: 'Image not found' };
+      }
+    } catch (e) {
+      logger.error('加载表情包图片失败: %s', (e as Error).message);
+      this.response.status = 500;
+      this.response.body = { error: 'Failed to load image' };
+    }
+  }
+}
+
 // 提供当前最新的 CS2 状态（REST 轮询接口，备用）
 class ProjectionStateHandler extends Handler<Context> {
   noCheckPermView = true;
@@ -131,7 +179,86 @@ class ProjectionCs2GSIHandler extends Handler<Context> {
       // 日志简单标记一下回合 / 玩家信息，方便调试
       const roundPhase = body?.round?.phase;
       const playerName = body?.player?.name;
-      logger.debug('收到 CS2 GSI 更新: roundPhase=%s, player=%s', roundPhase, playerName);
+      const currentRoundNumber = body?.round?.round ?? null;
+      
+      logger.debug('收到 CS2 GSI 更新: roundPhase=%s, round=%s, player=%s', roundPhase, currentRoundNumber, playerName);
+
+      // 检测回合结束：phase 变成 'over' 或 'gameover'，且回合数或阶段发生变化
+      const isRoundEnd = (roundPhase === 'over' || roundPhase === 'gameover') &&
+                         (currentRoundNumber !== lastRoundNumber || roundPhase !== lastRoundPhase);
+      
+      if (isRoundEnd) {
+        logger.info('检测到回合结束: round=%s, phase=%s', currentRoundNumber, roundPhase);
+        
+        // 提取回合信息
+        const round = body?.round || {};
+        const player = body?.player || {};
+        const playerState = player?.state || {};
+        const playerStats = player?.match_stats || {};
+        const map = body?.map || {};
+        const allPlayers = body?.allplayers || {};
+        
+        // 构建完整的回合数据
+        const roundData = {
+          round: currentRoundNumber,
+          phase: roundPhase,
+          winner: round?.winner || null,
+          player: {
+            name: player?.name || null,
+            team: player?.team || null,
+            steamid: player?.steamid || null,
+            state: {
+              health: playerState?.health ?? 0,
+              armor: playerState?.armor ?? 0,
+              money: playerState?.money ?? 0,
+              round_kills: playerState?.round_kills ?? 0,
+              round_killhs: playerState?.round_killhs ?? 0,
+              round_damage: playerState?.round_damage ?? 0,
+              flashed: playerState?.flashed ?? 0,
+              burning: playerState?.burning ?? 0,
+            },
+            // 添加玩家统计数据
+            stats: {
+              kills: playerStats?.kills ?? 0,
+              assists: playerStats?.assists ?? 0,
+              deaths: playerStats?.deaths ?? 0,
+              mvps: playerStats?.mvps ?? 0,
+              score: playerStats?.score ?? 0,
+            },
+            // 添加武器信息
+            weapons: playerState?.weapons || {},
+            // 添加位置信息（如果有）
+            position: playerState?.position || null,
+          },
+          map: {
+            name: map?.name || null,
+            phase: map?.phase || null,
+            round_wins: map?.round_wins || {},
+            team_ct: {
+              score: map?.team_ct?.score ?? 0,
+              name: map?.team_ct?.name || 'CT',
+            },
+            team_t: {
+              score: map?.team_t?.score ?? 0,
+              name: map?.team_t?.name || 'T',
+            },
+          },
+          // 添加所有玩家信息（用于分析团队表现）
+          allplayers: allPlayers,
+          timestamp: Date.now(),
+        };
+        
+        // 发送回合信息到上游
+        sendRoundInfo(roundData);
+      }
+      
+      // 更新最后的状态
+      if (currentRoundNumber !== null) {
+        lastRoundNumber = currentRoundNumber;
+      }
+      if (roundPhase) {
+        lastRoundPhase = roundPhase;
+      }
 
       // 调试日志：打印关键字段（注意长度控制，避免刷屏）
       try {
@@ -862,6 +989,85 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
         logger.debug('[projection-ws] 初始状态推送失败: %s', (e as Error).message);
       }
     }
+    
+    // 订阅 TTS 音频和 Agent 内容事件
+    try {
+      const ctx = this.ctx;
+      const ttsHandler = (audioData: any) => {
+        try {
+          this.send({
+            type: 'tts/audio',
+            data: audioData,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 TTS 音频失败: %s', (e as Error).message);
+        }
+      };
+      
+      const contentHandler = (contentData: any) => {
+        try {
+          this.send({
+            type: 'agent/content',
+            data: contentData,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 Agent 内容失败: %s', (e as Error).message);
+        }
+      };
+      
+      const contentStartHandler = (data: any) => {
+        try {
+          this.send({
+            type: 'agent/content/start',
+            data: data,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 Agent 内容开始失败: %s', (e as Error).message);
+        }
+      };
+      
+      const contentEndHandler = (data: any) => {
+        try {
+          this.send({
+            type: 'agent/content/end',
+            data: data,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 Agent 内容结束失败: %s', (e as Error).message);
+        }
+      };
+      
+      const messageHandler = (messageData: any) => {
+        try {
+          this.send({
+            type: 'agent/message',
+            data: messageData,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 Agent 消息失败: %s', (e as Error).message);
+        }
+      };
+      
+      ctx.on('projection/tts/audio', ttsHandler);
+      ctx.on('projection/agent/content', contentHandler);
+      ctx.on('projection/agent/content/start', contentStartHandler);
+      ctx.on('projection/agent/content/end', contentEndHandler);
+      ctx.on('projection/agent/message', messageHandler);
+      
+      // 保存处理器引用以便清理
+      (this as any)._ttsHandler = ttsHandler;
+      (this as any)._contentHandler = contentHandler;
+      (this as any)._contentStartHandler = contentStartHandler;
+      (this as any)._contentEndHandler = contentEndHandler;
+      (this as any)._messageHandler = messageHandler;
+    } catch (e) {
+      logger.debug('[projection-ws] 订阅事件失败: %s', (e as Error).message);
+    }
   }
 
   async message(msg: any) {
@@ -878,6 +1084,38 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
 
   async cleanup() {
     projectionConnections.delete(this);
+    
+    // 清理事件监听器（使用全局 Context，避免 inject 问题）
+    try {
+      const globalCtx = (global as any).__cordis_ctx;
+      if (globalCtx) {
+        const ttsHandler = (this as any)._ttsHandler;
+        const contentHandler = (this as any)._contentHandler;
+        const contentStartHandler = (this as any)._contentStartHandler;
+        const contentEndHandler = (this as any)._contentEndHandler;
+        const messageHandler = (this as any)._messageHandler;
+        
+        if (ttsHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/tts/audio', ttsHandler);
+        }
+        if (contentHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/agent/content', contentHandler);
+        }
+        if (contentStartHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/agent/content/start', contentStartHandler);
+        }
+        if (contentEndHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/agent/content/end', contentEndHandler);
+        }
+        if (messageHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/agent/message', messageHandler);
+        }
+      }
+    } catch (e) {
+      // 忽略清理错误，连接已断开，监听器会自动失效
+      // logger.debug('[projection-ws] 清理事件监听器失败: %s', (e as Error).message);
+    }
+    
     logger.debug('[projection-ws] 前端连接已断开，当前连接数: %d', projectionConnections.size);
   }
 }
@@ -895,6 +1133,8 @@ export async function apply(ctx: Context) {
   // Faceit API
   ctx.Route('faceit-stats', '/api/projection/faceit', FaceitStatsHandler);
   ctx.Route('faceit-match', '/api/projection/faceit-match', FaceitMatchHandler);
+  // 表情包图片服务
+  ctx.Route('projection-image', '/images/:name', ProjectionImageHandler);
   ctx.Connection('projection-ws', '/projection-ws', ProjectionWebSocketHandler);
 }
 

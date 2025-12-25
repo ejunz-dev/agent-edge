@@ -15,6 +15,7 @@ import RoundStats from './widgets/RoundStats';
 import Score from './widgets/Score';
 import Weapons from './widgets/Weapons';
 import EmojiDisplay from './widgets/EmojiDisplay';
+import TTSPlayer from '../components/TTSPlayer';
 
 const widgetMap: Record<string, React.ComponentType> = {
   player: PlayerInfo,
@@ -31,6 +32,7 @@ const widgetMap: Record<string, React.ComponentType> = {
   enemyteam: EnemyTeam,
   agentstream: AgentStream,
   emoji: EmojiDisplay,
+  tts: TTSPlayer,
 };
 
 export default function Widget() {

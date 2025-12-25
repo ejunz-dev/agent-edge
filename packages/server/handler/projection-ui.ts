@@ -39,22 +39,162 @@ function broadcastState() {
 class ProjectionUIHomeHandler extends Handler<Context> {
   noCheckPermView = true;
   async get() {
+    logger.info('[ProjectionUI] ========== GET 请求开始 ==========');
+    logger.info('[ProjectionUI] URL: %s', this.request.url);
+    logger.info('[ProjectionUI] Path: %s', this.request.path);
+    logger.info('[ProjectionUI] Method: %s', this.request.method);
+    logger.info('[ProjectionUI] Headers: %o', this.request.headers);
     const context = {
       secretRoute: '',
       contest: { id: 'projection', name: 'CS2 Projection Overlay' },
     };
 
+    // 从数据库加载所有 widget 配置（服务端渲染）
+    let widgetConfigs: Record<string, any> = {};
+    try {
+      // 尝试从数据库加载配置
+      const docs = await this.ctx.db.widgetConfig.find({});
+      logger.info('[ProjectionUI] 数据库查询结果: %d 条记录', docs.length);
+      for (const doc of docs) {
+        widgetConfigs[doc.widgetName] = doc.config;
+        logger.info('[ProjectionUI] 加载配置: %s', doc.widgetName);
+      }
+      logger.info('[ProjectionUI] 加载了 %d 个 widget 配置', Object.keys(widgetConfigs).length);
+    } catch (e) {
+      logger.error('[ProjectionUI] 加载 widget 配置失败: %s', (e as Error).message);
+      logger.error('[ProjectionUI] 错误堆栈: %s', (e as Error).stack);
+    }
+
     if (this.request.headers.accept === 'application/json') {
-      this.response.body = context;
+      this.response.body = { ...context, widgetConfigs };
     } else {
       this.response.type = 'text/html';
+      // 禁用缓存，确保每次请求都获取最新配置
+      this.response.addHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      this.response.addHeader('Pragma', 'no-cache');
+      this.response.addHeader('Expires', '0');
+      
       const bundlePath = path.resolve(__dirname, '../data/static.projection-ui');
       const hasBundle = fs.existsSync(bundlePath);
-      const scriptPath = hasBundle ? `/projection-ui/main.js?${randomHash}` : '/main.js';
-      const html = `<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CS2 Projection Overlay - @Ejunz/agent-edge</title></head><body style="margin:0;background:transparent;"><div id="root"></div><script>window.Context=JSON.parse('${JSON.stringify(context).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}')</script><script src="${scriptPath}"></script></body></html>`;
+      const scriptPath = hasBundle ? `/main.js?${randomHash}` : '/main.js';
+      // 将 widget 配置嵌入到 HTML 中，供前端使用
+      const widgetConfigsScript = `window.__WIDGET_CONFIGS__=JSON.parse('${JSON.stringify(widgetConfigs).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}');`;
+      const html = `<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CS2 Projection Overlay - @Ejunz/agent-edge</title></head><body style="margin:0;background:transparent;"><div id="root"></div><script>window.Context=JSON.parse('${JSON.stringify(context).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}')</script><script>${widgetConfigsScript}</script><script src="${scriptPath}"></script></body></html>`;
       this.response.body = html;
     }
   }
+}
+
+// 为每个 widget 创建专门的路由 handler 基类
+class BaseWidgetHandler extends Handler<Context> {
+  noCheckPermView = true;
+  protected abstract getWidgetName(): string;
+
+  async get() {
+    const widgetName = this.getWidgetName();
+    logger.info(`[${this.constructor.name}] ${widgetName} - GET 请求: %s`, this.request.url);
+    const context = {
+      secretRoute: '',
+      contest: { id: 'projection', name: 'CS2 Projection Overlay' },
+    };
+
+    // 从数据库加载该 widget 的配置（服务端渲染）
+    let widgetConfig: any = null;
+    try {
+      await this.ctx.inject(['dbservice'], async (ctx) => {
+        const doc = await ctx.db.widgetConfig.findOne({ widgetName });
+        if (doc) {
+          widgetConfig = doc.config;
+          logger.info(`[${this.constructor.name}] ${widgetName} - 加载配置成功`);
+        } else {
+          logger.info(`[${this.constructor.name}] ${widgetName} - 未找到配置，使用默认配置`);
+        }
+      });
+    } catch (e) {
+      logger.error(`[${this.constructor.name}] ${widgetName} - 加载配置失败: %s`, (e as Error).message);
+    }
+
+    if (this.request.headers.accept === 'application/json') {
+      this.response.body = { ...context, widgetConfig: widgetConfig || {} };
+    } else {
+      this.response.type = 'text/html';
+      // 禁用缓存，确保每次请求都获取最新配置
+      this.response.addHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      this.response.addHeader('Pragma', 'no-cache');
+      this.response.addHeader('Expires', '0');
+      
+      const bundlePath = path.resolve(__dirname, '../data/static.projection-ui');
+      const hasBundle = fs.existsSync(bundlePath);
+      const scriptPath = hasBundle ? `/main.js?${randomHash}` : '/main.js';
+      // 将 widget 配置嵌入到 HTML 中，供前端使用
+      const widgetConfigScript = widgetConfig 
+        ? `window.__WIDGET_CONFIG__=JSON.parse('${JSON.stringify(widgetConfig).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}');`
+        : `window.__WIDGET_CONFIG__=null;`;
+      const html = `<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${widgetName} - CS2 Projection Overlay</title></head><body style="margin:0;background:transparent;"><div id="root"></div><script>window.Context=JSON.parse('${JSON.stringify(context).replace(/\\/g, '\\\\').replace(/'/g, '\\\'')}')</script><script>window.__WIDGET_NAME__='${widgetName}';</script><script>${widgetConfigScript}</script><script src="${scriptPath}"></script></body></html>`;
+      this.response.body = html;
+    }
+  }
+}
+
+// 为每个 widget 创建独立的 handler 类
+class WeaponsHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'weapons'; }
+}
+
+class PlayerHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'player'; }
+}
+
+class HealthHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'health'; }
+}
+
+class ArmorHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'armor'; }
+}
+
+class ScoreHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'score'; }
+}
+
+class BombHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'bomb'; }
+}
+
+class StatsHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'stats'; }
+}
+
+class RoundHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'round'; }
+}
+
+class FaceitHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'faceit'; }
+}
+
+class MatchTeamsHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'matchteams'; }
+}
+
+class MyTeamHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'myteam'; }
+}
+
+class EnemyTeamHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'enemyteam'; }
+}
+
+class AgentStreamHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'agentstream'; }
+}
+
+class EmojiHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'emoji'; }
+}
+
+class TTSHandler extends BaseWidgetHandler {
+  protected getWidgetName() { return 'tts'; }
 }
 
 // 提供 Projection UI 的静态 JS bundle
@@ -1158,10 +1298,126 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
   }
 }
 
+// Widget 配置 API Handler
+class WidgetConfigHandler extends Handler<Context> {
+  noCheckPermView = true;
+  allowCors = true;
+
+  async get() {
+    try {
+      const widgetName = this.request.query.widgetName as string;
+      
+      await this.ctx.inject(['dbservice'], async (ctx) => {
+        if (widgetName) {
+          // 获取单个组件的配置
+          const doc = await ctx.db.widgetConfig.findOne({ widgetName });
+          if (doc) {
+            this.response.body = { success: true, config: doc.config };
+          } else {
+            this.response.body = { success: true, config: null };
+          }
+        } else {
+          // 获取所有组件的配置
+          const docs = await ctx.db.widgetConfig.find({});
+          const configs: Record<string, any> = {};
+          for (const doc of docs) {
+            configs[doc.widgetName] = doc.config;
+          }
+          this.response.body = { success: true, configs };
+        }
+        this.response.type = 'application/json';
+      });
+    } catch (e) {
+      logger.error('获取 Widget 配置失败: %s', (e as Error).message);
+      this.response.status = 500;
+      this.response.type = 'application/json';
+      this.response.body = { error: (e as Error).message };
+    }
+  }
+
+  async post() {
+    try {
+      logger.info('[WidgetConfig] POST 请求，body: %o', this.request.body);
+      const body = this.request.body || {};
+      const { widgetName, config } = body;
+      
+      logger.info('[WidgetConfig] 解析参数: widgetName=%s, config存在=%s', widgetName, !!config);
+      
+      if (!widgetName || !config) {
+        logger.error('[WidgetConfig] 缺少必要参数: widgetName=%s, config=%o', widgetName, config);
+        this.response.status = 400;
+        this.response.type = 'application/json';
+        this.response.body = { error: '缺少必要参数: widgetName 和 config', received: { widgetName: !!widgetName, config: !!config } };
+        return;
+      }
+
+      // 直接使用 this.ctx.db（通过 mixin 暴露），参考其他 handler 的做法
+      const now = Date.now();
+      const existing = await this.ctx.db.widgetConfig.findOne({ widgetName });
+      logger.info('[WidgetConfig] 查找现有配置: widgetName=%s, 存在=%s', widgetName, !!existing);
+      
+      if (existing) {
+        // 更新现有配置
+        logger.info('[WidgetConfig] 更新配置: widgetName=%s, stylePreset=%s', widgetName, config?.stylePreset);
+        await this.ctx.db.widgetConfig.update(
+          { widgetName },
+          { $set: { config, updatedAt: now } }
+        );
+      } else {
+        // 创建新配置
+        logger.info('[WidgetConfig] 创建新配置: widgetName=%s, stylePreset=%s', widgetName, config?.stylePreset);
+        await this.ctx.db.widgetConfig.insert({
+          _id: widgetName,
+          widgetName,
+          config,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+      
+      // 验证保存是否成功
+      const savedDoc = await this.ctx.db.widgetConfig.findOne({ widgetName });
+      logger.info('[WidgetConfig] 保存后验证: widgetName=%s, 存在=%s, stylePreset=%s', 
+        widgetName, !!savedDoc, savedDoc?.config?.stylePreset);
+      
+      this.response.type = 'application/json';
+      this.response.body = { success: true, saved: !!savedDoc };
+      logger.info('[WidgetConfig] 响应已设置: %o', this.response.body);
+    } catch (e) {
+      logger.error('[WidgetConfig] 保存 Widget 配置失败: %s', (e as Error).message);
+      this.response.status = 500;
+      this.response.type = 'application/json';
+      this.response.body = { error: (e as Error).message };
+    }
+  }
+}
+
 export async function apply(ctx: Context) {
   // 在默认 server 模式下注册（不区分 client / node / provider）
-  ctx.Route('projection-ui-home', '/projection-ui', ProjectionUIHomeHandler);
-  ctx.Route('projection-ui-static', '/projection-ui/main.js', ProjectionUIStaticHandler);
+  // 注意：路由注册顺序很重要，具体路由要在通配符路由之前
+  ctx.Route('projection-ui-static', '/main.js', ProjectionUIStaticHandler);
+  
+  // 为每个 widget 注册独立的路由 handler（必须在通配符路由之前）
+  ctx.Route('weapons', '/widget/weapons', WeaponsHandler);
+  ctx.Route('player', '/widget/player', PlayerHandler);
+  ctx.Route('health', '/widget/health', HealthHandler);
+  ctx.Route('armor', '/widget/armor', ArmorHandler);
+  ctx.Route('score', '/widget/score', ScoreHandler);
+  ctx.Route('bomb', '/widget/bomb', BombHandler);
+  ctx.Route('stats', '/widget/stats', StatsHandler);
+  ctx.Route('round', '/widget/round', RoundHandler);
+  ctx.Route('faceit', '/widget/faceit', FaceitHandler);
+  ctx.Route('matchteams', '/widget/matchteams', MatchTeamsHandler);
+  ctx.Route('myteam', '/widget/myteam', MyTeamHandler);
+  ctx.Route('enemyteam', '/widget/enemyteam', EnemyTeamHandler);
+  ctx.Route('agentstream', '/widget/agentstream', AgentStreamHandler);
+  ctx.Route('emoji', '/widget/emoji', EmojiHandler);
+  ctx.Route('tts', '/widget/tts', TTSHandler);
+  
+  // 根路径返回 HTML，用于显示 Dashboard 和其他页面
+  // 这确保 BrowserRouter 的所有路由都能正确加载
+  ctx.Route('projection-ui-root', '/', ProjectionUIHomeHandler);
+  
   ctx.Route('projection-state', '/api/projection/state', ProjectionStateHandler);
   ctx.Route('projection-info', '/api/projection/info', ProjectionInfoHandler);
   // CS2 GSI 入口，提供多个别名路径，方便在游戏里配置
@@ -1171,6 +1427,8 @@ export async function apply(ctx: Context) {
   // Faceit API
   ctx.Route('faceit-stats', '/api/projection/faceit', FaceitStatsHandler);
   ctx.Route('faceit-match', '/api/projection/faceit-match', FaceitMatchHandler);
+  // Widget 配置 API
+  ctx.Route('widget-config', '/api/projection/widget-config', WidgetConfigHandler);
   // 表情包图片服务
   ctx.Route('projection-image', '/images/:name', ProjectionImageHandler);
   ctx.Connection('projection-ws', '/projection-ws', ProjectionWebSocketHandler);

@@ -1,32 +1,66 @@
 import { Paper, Stack, Text, Title } from '@mantine/core';
 import React from 'react';
 import { useCs2State } from '../../hooks/useCs2State';
+import { WidgetConfig } from '../../utils/widgetConfig';
+import { getDataFieldValue, formatDisplayText } from '../../utils/widgetTextFields';
 
-export default function PlayerInfo() {
+interface PlayerInfoProps {
+  config?: WidgetConfig;
+}
+
+export default function PlayerInfo({ config }: PlayerInfoProps) {
   const { state } = useCs2State();
-  const player = state?.player || {};
-  const map = state?.map || {};
-  const team = player?.team || map?.team_ct?.name || '';
+
+  const style = config?.style || {};
+  const titleConfig = config?.title || {};
+  const textConfig = config?.text || {};
+  const texts = config?.texts || {};
+
+  // 获取玩家名称
+  const playerNameConfig = texts.playerName || {
+    dataField: 'player.name',
+    displayText: '{value}',
+    fallback: '等待 CS2 GSI 数据...',
+  };
+  const playerNameValue = getDataFieldValue(state, playerNameConfig.dataField || 'player.name');
+  const playerNameText = formatDisplayText(
+    playerNameConfig.displayText || '{value}',
+    playerNameValue,
+    playerNameConfig.fallback || '等待 CS2 GSI 数据...'
+  );
+
+  // 获取队伍
+  const teamConfig = texts.team || {
+    dataField: 'player.team',
+    displayText: '{value}',
+    fallback: '未知阵营',
+  };
+  const teamValue = getDataFieldValue(state, teamConfig.dataField || 'player.team');
+  const teamText = formatDisplayText(
+    teamConfig.displayText || '{value}',
+    teamValue,
+    teamConfig.fallback || '未知阵营'
+  );
 
   return (
     <Paper
-      shadow="xl"
-      radius="md"
-      p="md"
+      shadow={style.shadow || 'xl'}
+      radius={style.borderRadius || 'md'}
+      p={style.padding || 'md'}
       withBorder
       style={{
-        minWidth: 200,
-        background: 'rgba(15, 15, 20, 0.74)',
-        borderColor: 'rgba(255, 255, 255, 0.12)',
-        backdropFilter: 'blur(12px)',
+        minWidth: style.minWidth || 200,
+        background: style.background || 'rgba(15, 15, 20, 0.74)',
+        borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
+        backdropFilter: style.backdropFilter || 'blur(12px)',
       }}
     >
       <Stack gap={2}>
-        <Title order={3} c="white">
-          {player?.name || '等待 CS2 GSI 数据...'}
+        <Title order={titleConfig.order || 3} c={titleConfig.color || 'white'}>
+          {playerNameText}
         </Title>
-        <Text size="sm" c="dimmed">
-          {team || '未知阵营'}
+        <Text size={textConfig.size || 'sm'} c={textConfig.color || 'dimmed'}>
+          {teamText}
         </Text>
       </Stack>
     </Paper>

@@ -1,15 +1,24 @@
 import { Box, Progress, Text, Group, Badge } from '@mantine/core';
 import React, { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useProjectionMessage } from '../hooks/useProjectionWebSocket';
 
 const sampleRate = 24000; // 采样率
 
+import { WidgetConfig } from '../utils/widgetConfig';
+
 interface TTSPlayerProps {
+  config?: WidgetConfig;
   size?: 'sm' | 'md' | 'lg';
   showProgress?: boolean;
 }
 
-export default function TTSPlayer({ size = 'md', showProgress = true }: TTSPlayerProps) {
+export default function TTSPlayer({ config, size: propSize, showProgress: propShowProgress }: TTSPlayerProps) {
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
+  const size = propSize || config?.size || 'md';
+  const showProgress = propShowProgress !== undefined ? propShowProgress : (config?.showProgress !== undefined ? config.showProgress : true);
+  const style = config?.style || {};
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<'idle' | 'playing' | 'finished'>('idle');
@@ -26,6 +35,16 @@ export default function TTSPlayer({ size = 'md', showProgress = true }: TTSPlaye
   const isReceivingRef = useRef(false);
   const lastChunkTimeRef = useRef<number | null>(null);
   const isVisibleRef = useRef(false); // 使用 ref 跟踪可见性状态
+
+  // 预览模式下始终显示
+  useEffect(() => {
+    if (isPreview) {
+      setIsVisible(true);
+      isVisibleRef.current = true;
+      setStatus('playing');
+      setProgress(50);
+    }
+  }, [isPreview]);
 
   // 初始化音频上下文
   useEffect(() => {
@@ -422,21 +441,21 @@ export default function TTSPlayer({ size = 'md', showProgress = true }: TTSPlaye
 
   const currentSizeStyle = sizeStyles[size];
 
-  // 如果不可见，不渲染组件
-  if (!isVisible || !isVisibleRef.current) {
+  // 预览模式下始终显示，否则根据条件显示
+  if (!isPreview && (!isVisible || !isVisibleRef.current)) {
     console.log('[TTSPlayer] 组件不可见，不渲染。isVisible:', isVisible, 'isVisibleRef:', isVisibleRef.current);
     return null;
   }
   
-  console.log('[TTSPlayer] 渲染组件，状态:', status, '可见:', isVisible);
+  console.log('[TTSPlayer] 渲染组件，状态:', status, '可见:', isVisible || isPreview);
 
   return (
     <Box
       style={{
-        width: '400px',
-        height: '120px',
-        minWidth: '400px',
-        minHeight: '120px',
+        width: style.width ? `${style.width}px` : style.minWidth ? `${style.minWidth}px` : '400px',
+        height: style.height ? `${style.height}px` : style.minHeight ? `${style.minHeight}px` : '120px',
+        minWidth: style.minWidth ? `${style.minWidth}px` : '400px',
+        minHeight: style.minHeight ? `${style.minHeight}px` : '120px',
         display: 'flex',
         flexDirection: 'column',
         justifyContent: 'center',
@@ -448,17 +467,17 @@ export default function TTSPlayer({ size = 'md', showProgress = true }: TTSPlaye
       }}
     >
       <Box
-        style={{
-          width: '100%',
-          height: '100%',
-          padding: '16px',
-          backgroundColor: 'rgba(15, 15, 20, 0.95)',
-          border: '1px solid rgba(255, 255, 255, 0.12)',
-          borderRadius: '8px',
-          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5)',
-          backdropFilter: 'blur(12px)',
-          display: 'flex',
-          flexDirection: 'column',
+          style={{
+            width: '100%',
+            height: '100%',
+            padding: style.padding || '16px',
+            backgroundColor: style.background || 'rgba(15, 15, 20, 0.95)',
+            border: style.borderColor ? `1px solid ${style.borderColor}` : '1px solid rgba(255, 255, 255, 0.12)',
+            borderRadius: style.borderRadius || '8px',
+            boxShadow: style.shadow ? `0 4px 20px rgba(0, 0, 0, 0.5)` : '0 4px 20px rgba(0, 0, 0, 0.5)',
+            backdropFilter: style.backdropFilter || 'blur(12px)',
+            display: 'flex',
+            flexDirection: 'column',
           justifyContent: 'center',
         }}
       >

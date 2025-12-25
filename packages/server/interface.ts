@@ -53,3 +53,11 @@ export interface VTuberAuthTokenDoc {
     updatedAt: number;
     createdAt: number;
 }
+
+export interface WidgetConfigDoc {
+    _id: string;
+    widgetName: string;
+    config: Record<string, any>;
+    updatedAt: number;
+    createdAt: number;
+}

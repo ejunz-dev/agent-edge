@@ -125,8 +125,9 @@ async function applyProvider(ctx: Context) {
 
 // Projection 模式：专门用于 CS2 GSI 投影（独立启动方式，类似 --node）
 async function applyProjection(ctx: Context) {
-    // 仅需要 WebService + Projection UI/后端
+    // 需要 WebService + DBService + Projection UI/后端
     await ctx.plugin(require('./service/server'));
+    ctx.plugin(DBService);
     
     // 启动上游连接（不启动语音输入）
     const { startConnecting } = require('./projection/client');
@@ -135,7 +136,7 @@ async function applyProjection(ctx: Context) {
     // 保存 server 引用以便关闭
     let serverInstance: any = null;
     
-    await ctx.inject(['server'], async (c) => {
+    await ctx.inject(['server', 'dbservice'], async (c) => {
         await Promise.all([
             c.plugin(require('./handler/projection-ui')),
         ]);
@@ -212,7 +213,7 @@ async function apply(ctx) {
     } else if (process.argv.includes('--node')) {
         applyNode(ctx);
     } else if (process.argv.includes('--projection')) {
-        // Projection 模式：不需要 DBService，仅启动 WebService + projection handler
+        // Projection 模式：启动 WebService + DBService + projection handler
         await applyProjection(ctx);
     } else if (process.argv.includes('--proxy')) {
         // Proxy 模式：只启动服务器，不加载其他服务

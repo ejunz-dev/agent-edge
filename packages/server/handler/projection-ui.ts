@@ -35,6 +35,23 @@ function broadcastState() {
   }
 }
 
+// 广播配置更新通知
+function broadcastConfigUpdate(widgetName: string) {
+  const payload = {
+    type: 'widget/config/update',
+    data: { widgetName },
+    ts: Date.now(),
+  };
+  logger.info('[WidgetConfig] 广播配置更新通知: widgetName=%s, 连接数=%d', widgetName, projectionConnections.size);
+  for (const conn of projectionConnections) {
+    try {
+      conn.send(payload);
+    } catch (e) {
+      logger.debug('[WidgetConfig] 向前端推送配置更新失败: %s', (e as Error).message);
+    }
+  }
+}
+
 // 提供 Projection UI 的 HTML 页面（给 OBS 加载）
 class ProjectionUIHomeHandler extends Handler<Context> {
   noCheckPermView = true;
@@ -1379,6 +1396,11 @@ class WidgetConfigHandler extends Handler<Context> {
       const savedDoc = await this.ctx.db.widgetConfig.findOne({ widgetName });
       logger.info('[WidgetConfig] 保存后验证: widgetName=%s, 存在=%s, stylePreset=%s', 
         widgetName, !!savedDoc, savedDoc?.config?.stylePreset);
+      
+      // 广播配置更新通知给所有连接的客户端
+      if (savedDoc) {
+        broadcastConfigUpdate(widgetName);
+      }
       
       this.response.type = 'application/json';
       this.response.body = { success: true, saved: !!savedDoc };

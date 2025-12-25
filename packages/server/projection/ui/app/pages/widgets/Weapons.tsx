@@ -22,6 +22,17 @@ interface WeaponsProps {
 }
 
 export default function Weapons({ config }: WeaponsProps) {
+  // 调试日志：组件渲染
+  React.useEffect(() => {
+    console.log('[Weapons] 组件渲染，配置:', {
+      minWidth: config?.style?.minWidth,
+      padding: config?.style?.padding,
+      stylePreset: config?.stylePreset,
+      showIcon: config?.showIcon,
+      showText: config?.showText,
+    });
+  }, [config]);
+
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -61,19 +72,27 @@ export default function Weapons({ config }: WeaponsProps) {
 
   const style = config?.style || {};
 
+  // 构建样式对象，避免 border 和 borderColor 冲突
+  const paperStyle: React.CSSProperties = {
+    minWidth: style.minWidth || 240,
+    background: style.background || 'rgba(15, 15, 20, 0.74)',
+    backdropFilter: style.backdropFilter || 'blur(12px)',
+  };
+
+  // 如果设置了完整的 border，使用它；否则使用 borderColor
+  if (style.border) {
+    paperStyle.border = style.border;
+  } else {
+    paperStyle.borderColor = style.borderColor || 'rgba(255, 255, 255, 0.12)';
+  }
+
   return (
     <Paper
       shadow={style.shadow || 'xl'}
       radius={style.borderRadius || 'md'}
       p={style.padding || 'md'}
-      withBorder
-      style={{
-        minWidth: style.minWidth || 240,
-        background: style.background || 'rgba(15, 15, 20, 0.74)',
-        borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
-        backdropFilter: style.backdropFilter || 'blur(12px)',
-        border: style.border,
-      }}
+      withBorder={!style.border} // 如果设置了自定义 border，不使用 withBorder
+      style={paperStyle}
     >
       <Stack gap={4}>
         {config?.showText !== false && (

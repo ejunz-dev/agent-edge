@@ -31,6 +31,7 @@ class ProjectionWebSocketManager {
     this.ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
+        console.log('[ProjectionWebSocket] 收到消息:', msg.type, msg);
         // 通知所有监听器
         this.listeners.forEach((listener) => {
           try {
@@ -40,7 +41,7 @@ class ProjectionWebSocketManager {
           }
         });
       } catch (e) {
-        console.error('[ProjectionWebSocket] 解析消息失败:', e);
+        console.error('[ProjectionWebSocket] 解析消息失败:', e, ev.data);
       }
     };
 
@@ -62,13 +63,18 @@ class ProjectionWebSocketManager {
   }
 
   subscribe(listener: (data: any) => void) {
+    console.log('[ProjectionWebSocket] 添加监听器，当前连接数:', this.listeners.size);
     this.listeners.add(listener);
     // 如果还没有连接，先连接
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.log('[ProjectionWebSocket] 连接未建立，开始连接...');
       this.connect();
+    } else {
+      console.log('[ProjectionWebSocket] 连接已建立，readyState:', this.ws.readyState);
     }
     // 返回取消订阅函数
     return () => {
+      console.log('[ProjectionWebSocket] 移除监听器');
       this.listeners.delete(listener);
     };
   }
@@ -141,18 +147,42 @@ export function useProjectionMessage<T = any>(
   messageType: string,
   handler: (data: T) => void
 ) {
+  const handlerRef = useRef(handler);
+  
+  // 保持 handler 引用最新
   useEffect(() => {
+    handlerRef.current = handler;
+  }, [handler]);
+  
+  useEffect(() => {
+    console.log(`[useProjectionMessage] 订阅消息类型: ${messageType}`);
     const listener = (msg: any) => {
+      console.log(`[useProjectionMessage] 收到消息: type=${msg.type}, 期望=${messageType}`, msg);
       if (msg.type === messageType) {
-        handler(msg.data || msg);
+        console.log(`[useProjectionMessage] 消息类型匹配，调用 handler`);
+        try {
+          handlerRef.current(msg.data || msg);
+        } catch (e) {
+          console.error(`[useProjectionMessage] Handler 执行错误:`, e);
+        }
       }
     };
 
+    // 订阅并确保连接建立
     const unsubscribe = wsManager.subscribe(listener);
+    
+    // 确保连接已建立
+    if (!wsManager.isConnected()) {
+      console.log(`[useProjectionMessage] WebSocket 未连接，尝试连接...`);
+      wsManager.connect();
+    } else {
+      console.log(`[useProjectionMessage] WebSocket 已连接`);
+    }
 
     return () => {
+      console.log(`[useProjectionMessage] 取消订阅消息类型: ${messageType}`);
       unsubscribe();
     };
-  }, [messageType, handler]);
+  }, [messageType]);
 }
 

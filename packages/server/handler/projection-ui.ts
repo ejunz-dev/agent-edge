@@ -1436,9 +1436,13 @@ export async function apply(ctx: Context) {
   ctx.Route('emoji', '/widget/emoji', EmojiHandler);
   ctx.Route('tts', '/widget/tts', TTSHandler);
   
-  // 根路径返回 HTML，用于显示 Dashboard 和其他页面
-  // 这确保 BrowserRouter 的所有路由都能正确加载
+  // 为所有前端路由注册后端处理，确保 BrowserRouter 的所有路由都能正确加载
+  // 这些路由都需要返回 HTML，让前端 Router 处理路由
   ctx.Route('projection-ui-root', '/', ProjectionUIHomeHandler);
+  ctx.Route('projection-ui-live', '/live', ProjectionUIHomeHandler);
+  ctx.Route('projection-ui-chat', '/chat', ProjectionUIHomeHandler);
+  ctx.Route('projection-ui-config', '/config', ProjectionUIHomeHandler);
+  ctx.Route('projection-ui-widgets', '/widgets', ProjectionUIHomeHandler);
   
   ctx.Route('projection-state', '/api/projection/state', ProjectionStateHandler);
   ctx.Route('projection-info', '/api/projection/info', ProjectionInfoHandler);

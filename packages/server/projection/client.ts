@@ -140,14 +140,16 @@ function handleEventMessage(ws: any, msg: any) {
     switch (event) {
         case 'tts/audio': {
             // TTS 音频事件，转发给前端处理
+            // 上游服务器格式：payload = [{ audio: string }] - audio 是 base64 编码的音频数据
             const [audioData] = payload || [];
-            if (audioData) {
+            if (audioData && audioData.audio) {
                 logger.debug('[projection] 收到 TTS 音频事件');
                 // 通过 Cordis 事件系统传播到前端
                 try {
                     const ctx = (global as any).__cordis_ctx;
                     if (ctx) {
-                        ctx.emit('projection/tts/audio', audioData);
+                        // 统一格式：传递 { audio: string } 或 { chunk: string } 以兼容前端
+                        ctx.emit('projection/tts/audio', { audio: audioData.audio, chunk: audioData.audio });
                     }
                 } catch (e) {
                     logger.debug('传播 TTS 音频事件失败: %s', (e as Error).message);
@@ -217,6 +219,36 @@ function handleEventMessage(ws: any, msg: any) {
                 } catch (e) {
                     logger.debug('传播 Agent 消息事件失败: %s', (e as Error).message);
                 }
+            }
+            break;
+        }
+        
+        case 'tts/started': {
+            // TTS 开始事件（上游服务器发送）
+            logger.info('[projection] ✅ 收到 TTS 开始事件 (tts/started)');
+            try {
+                const ctx = (global as any).__cordis_ctx;
+                if (ctx) {
+                    ctx.emit('projection/tts/start', {});
+                    logger.info('[projection] ✅ 已转发 TTS 开始事件到前端');
+                }
+            } catch (e) {
+                logger.error('传播 TTS 开始事件失败: %s', (e as Error).message);
+            }
+            break;
+        }
+        
+        case 'tts/done': {
+            // TTS 完成事件（上游服务器发送）
+            logger.info('[projection] ✅ 收到 TTS 完成事件 (tts/done)');
+            try {
+                const ctx = (global as any).__cordis_ctx;
+                if (ctx) {
+                    ctx.emit('projection/tts/end', {});
+                    logger.info('[projection] ✅ 已转发 TTS 完成事件到前端');
+                }
+            } catch (e) {
+                logger.error('传播 TTS 完成事件失败: %s', (e as Error).message);
             }
             break;
         }
@@ -312,6 +344,8 @@ export function startConnecting(ctx?: Context) {
             
             // 订阅 TTS 音频和 Agent 内容事件
             sendEvent(ws, 'subscribe', 'tts/audio');
+            sendEvent(ws, 'subscribe', 'tts/started'); // 上游服务器使用 tts/started
+            sendEvent(ws, 'subscribe', 'tts/done'); // 上游服务器使用 tts/done
             sendEvent(ws, 'subscribe', 'agent/content');
             sendEvent(ws, 'subscribe', 'agent/content/start');
             sendEvent(ws, 'subscribe', 'agent/content/end');

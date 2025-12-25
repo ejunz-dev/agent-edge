@@ -97,6 +97,11 @@ class ProjectionWebSocketManager {
 // 全局单例
 const wsManager = new ProjectionWebSocketManager();
 
+// 暴露给全局，方便其他模块访问（用于发送消息）
+if (typeof window !== 'undefined') {
+  (window as any).__projectionWsManager = wsManager;
+}
+
 /**
  * 共享的 WebSocket Hook，所有组件使用同一个连接
  */

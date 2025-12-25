@@ -181,7 +181,8 @@ class ProjectionCs2GSIHandler extends Handler<Context> {
       const playerName = body?.player?.name;
       const currentRoundNumber = body?.round?.round ?? null;
       
-      logger.debug('收到 CS2 GSI 更新: roundPhase=%s, round=%s, player=%s', roundPhase, currentRoundNumber, playerName);
+      // 减少日志噪声：已注释掉频繁的 GSI 更新日志
+      // logger.debug('收到 CS2 GSI 更新: roundPhase=%s, round=%s, player=%s', roundPhase, currentRoundNumber, playerName);
 
       // 检测回合结束：phase 变成 'over' 或 'gameover'，且回合数或阶段发生变化
       const isRoundEnd = (roundPhase === 'over' || roundPhase === 'gameover') &&
@@ -270,7 +271,8 @@ class ProjectionCs2GSIHandler extends Handler<Context> {
             team: body?.player?.team,
           },
         };
-        logger.debug('CS2 GSI 关键字段: %s', JSON.stringify(debugPayload));
+        // 减少日志噪声：已注释掉频繁的 GSI 关键字段日志
+        // logger.debug('CS2 GSI 关键字段: %s', JSON.stringify(debugPayload));
       } catch {}
 
       // 推送给所有前端连接
@@ -1053,7 +1055,33 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
         }
       };
       
+      const ttsStartHandler = (data: any) => {
+        try {
+          this.send({
+            type: 'tts/start',
+            data: data,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 TTS 开始失败: %s', (e as Error).message);
+        }
+      };
+      
+      const ttsEndHandler = (data: any) => {
+        try {
+          this.send({
+            type: 'tts/end',
+            data: data,
+            ts: Date.now(),
+          });
+        } catch (e) {
+          logger.debug('[projection-ws] 发送 TTS 结束失败: %s', (e as Error).message);
+        }
+      };
+      
       ctx.on('projection/tts/audio', ttsHandler);
+      ctx.on('projection/tts/start', ttsStartHandler);
+      ctx.on('projection/tts/end', ttsEndHandler);
       ctx.on('projection/agent/content', contentHandler);
       ctx.on('projection/agent/content/start', contentStartHandler);
       ctx.on('projection/agent/content/end', contentEndHandler);
@@ -1061,6 +1089,8 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
       
       // 保存处理器引用以便清理
       (this as any)._ttsHandler = ttsHandler;
+      (this as any)._ttsStartHandler = ttsStartHandler;
+      (this as any)._ttsEndHandler = ttsEndHandler;
       (this as any)._contentHandler = contentHandler;
       (this as any)._contentStartHandler = contentStartHandler;
       (this as any)._contentEndHandler = contentEndHandler;
@@ -1090,6 +1120,8 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
       const globalCtx = (global as any).__cordis_ctx;
       if (globalCtx) {
         const ttsHandler = (this as any)._ttsHandler;
+        const ttsStartHandler = (this as any)._ttsStartHandler;
+        const ttsEndHandler = (this as any)._ttsEndHandler;
         const contentHandler = (this as any)._contentHandler;
         const contentStartHandler = (this as any)._contentStartHandler;
         const contentEndHandler = (this as any)._contentEndHandler;
@@ -1097,6 +1129,12 @@ class ProjectionWebSocketHandler extends ConnectionHandler<Context> {
         
         if (ttsHandler && typeof globalCtx.off === 'function') {
           globalCtx.off('projection/tts/audio', ttsHandler);
+        }
+        if (ttsStartHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/tts/start', ttsStartHandler);
+        }
+        if (ttsEndHandler && typeof globalCtx.off === 'function') {
+          globalCtx.off('projection/tts/end', ttsEndHandler);
         }
         if (contentHandler && typeof globalCtx.off === 'function') {
           globalCtx.off('projection/agent/content', contentHandler);

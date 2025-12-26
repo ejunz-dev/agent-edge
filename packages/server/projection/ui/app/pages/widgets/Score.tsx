@@ -1,6 +1,8 @@
 import { Group, Paper, Stack, Text } from '@mantine/core';
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 import { getDataFieldValue, formatDisplayText } from '../../utils/widgetTextFields';
 
@@ -9,6 +11,11 @@ interface ScoreProps {
 }
 
 export default function Score({ config }: ScoreProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('score', true, false);
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
+  
   const { state } = useCs2State();
 
   const style = config?.style || {};
@@ -55,6 +62,10 @@ export default function Score({ config }: ScoreProps) {
     ctScoreValue,
     ctScoreConfig.fallback || 'CT 0'
   );
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
 
   return (
     <Paper

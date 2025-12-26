@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useProjectionMessage } from '../../hooks/useProjectionWebSocket';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import EmojiDisplayComponent from '../../components/EmojiDisplay';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
@@ -11,6 +12,8 @@ interface EmojiDisplayProps {
 }
 
 export default function EmojiDisplay({ config }: EmojiDisplayProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('emoji', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const [trigger, setTrigger] = useState(0);
@@ -22,6 +25,9 @@ export default function EmojiDisplay({ config }: EmojiDisplayProps) {
   const { state } = useCs2State();
   const round = state?.round || {};
   const roundPhase = round?.phase || '';
+  
+  // 合并事件系统和内部可见性
+  const finalVisible = isVisible || eventVisible;
   
   // 更新 ref
   useEffect(() => {
@@ -133,8 +139,8 @@ export default function EmojiDisplay({ config }: EmojiDisplayProps) {
     }
   }, [hasContent, isLive, trigger, liveTimeout]);
 
-  // 预览模式下始终显示，否则根据条件显示
-  if (!isPreview && (!isVisible || !hasContent)) {
+  // 预览模式下始终显示，否则根据条件显示（事件系统或内部逻辑）
+  if (!isPreview && !finalVisible && (!isVisible || !hasContent)) {
     return null;
   }
 
@@ -153,8 +159,8 @@ export default function EmojiDisplay({ config }: EmojiDisplayProps) {
         height: `${height}px`,
         minWidth: `${minWidth}px`,
         minHeight: `${minHeight}px`,
-        opacity: (isVisible || isPreview) ? 1 : 0,
-        transform: (isVisible || isPreview) ? 'translateY(0)' : 'translateY(-20px)',
+        opacity: (finalVisible || isVisible || isPreview) ? 1 : 0,
+        transform: (finalVisible || isVisible || isPreview) ? 'translateY(0)' : 'translateY(-20px)',
         transition: 'opacity 0.3s ease, transform 0.3s ease',
       }}
     >

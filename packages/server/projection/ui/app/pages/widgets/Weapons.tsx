@@ -2,6 +2,7 @@ import { Group, Paper, Stack, Text } from '@mantine/core';
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
@@ -22,7 +23,10 @@ interface WeaponsProps {
 }
 
 export default function Weapons({ config }: WeaponsProps) {
-  // 调试日志：组件渲染
+  // 使用事件系统控制可见性（默认可见，事件可以控制）
+  const { isVisible } = useEventSystem('weapons', true, false);
+
+  // 调试日志：组件渲染和可见性变化
   React.useEffect(() => {
     console.log('[Weapons] 组件渲染，配置:', {
       minWidth: config?.style?.minWidth,
@@ -30,8 +34,18 @@ export default function Weapons({ config }: WeaponsProps) {
       stylePreset: config?.stylePreset,
       showIcon: config?.showIcon,
       showText: config?.showText,
+      isVisible,
+      willRender: isVisible || false,
     });
-  }, [config]);
+  }, [config, isVisible]);
+  
+  // 单独监听可见性变化
+  React.useEffect(() => {
+    console.log('[Weapons] ⚡ 可见性状态变化:', {
+      isVisible,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+  }, [isVisible]);
 
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
@@ -84,6 +98,10 @@ export default function Weapons({ config }: WeaponsProps) {
     paperStyle.border = style.border;
   } else {
     paperStyle.borderColor = style.borderColor || 'rgba(255, 255, 255, 0.12)';
+  }
+
+  if (!isVisible && !isPreview) {
+    return null;
   }
 
   return (

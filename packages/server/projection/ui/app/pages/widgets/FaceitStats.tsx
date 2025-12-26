@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function StatItem({ label, value, color = 'white' }: { label: string; value: React.ReactNode; color?: string }) {
@@ -23,6 +24,8 @@ interface FaceitStatsProps {
 }
 
 export default function FaceitStats({ config }: FaceitStatsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('faceit', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const nickname = searchParams.get('nickname') || '';
@@ -30,9 +33,9 @@ export default function FaceitStats({ config }: FaceitStatsProps) {
   const round = state?.round || {};
   const roundPhase = round?.phase || '';
 
-  // 预览模式下始终显示，否则根据 round.phase 控制显示/隐藏
+  // 预览模式下始终显示，否则根据 round.phase 控制显示/隐藏（事件系统或内部逻辑）
   // freezetime = 冻结时间（回合开始前的准备时间）
-  const shouldShow = isPreview || roundPhase === 'freezetime' || roundPhase === 'warmup';
+  const shouldShow = isPreview || eventVisible || roundPhase === 'freezetime' || roundPhase === 'warmup';
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['faceit-stats', nickname],

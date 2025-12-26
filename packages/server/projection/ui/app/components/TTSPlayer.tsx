@@ -2,6 +2,7 @@ import { Box, Progress, Text, Group, Badge } from '@mantine/core';
 import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useProjectionMessage } from '../hooks/useProjectionWebSocket';
+import { useEventSystem } from '../hooks/useEventSystem';
 
 const sampleRate = 24000; // 采样率
 
@@ -14,6 +15,8 @@ interface TTSPlayerProps {
 }
 
 export default function TTSPlayer({ config, size: propSize, showProgress: propShowProgress }: TTSPlayerProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('tts', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const size = propSize || config?.size || 'md';
@@ -23,6 +26,9 @@ export default function TTSPlayer({ config, size: propSize, showProgress: propSh
   const [progress, setProgress] = useState(0);
   const [status, setStatus] = useState<'idle' | 'playing' | 'finished'>('idle');
   const [isVisible, setIsVisible] = useState(false);
+  
+  // 合并事件系统和内部可见性
+  const finalVisible = isVisible || eventVisible;
   
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<Float32Array[]>([]);
@@ -442,7 +448,7 @@ export default function TTSPlayer({ config, size: propSize, showProgress: propSh
   const currentSizeStyle = sizeStyles[size];
 
   // 预览模式下始终显示，否则根据条件显示
-  if (!isPreview && (!isVisible || !isVisibleRef.current)) {
+  if (!isPreview && !finalVisible && (!isVisible || !isVisibleRef.current)) {
     console.log('[TTSPlayer] 组件不可见，不渲染。isVisible:', isVisible, 'isVisibleRef:', isVisibleRef.current);
     return null;
   }

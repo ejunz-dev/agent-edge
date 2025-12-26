@@ -1,6 +1,8 @@
 import { Paper, Stack, Text, Title } from '@mantine/core';
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 import { getDataFieldValue, formatDisplayText } from '../../utils/widgetTextFields';
 
@@ -9,9 +11,18 @@ interface PlayerInfoProps {
 }
 
 export default function PlayerInfo({ config }: PlayerInfoProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('player', true, false);
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
+  
   const { state } = useCs2State();
 
   const style = config?.style || {};
+  
+  if (!isVisible && !isPreview) {
+    return null;
+  }
   const titleConfig = config?.title || {};
   const textConfig = config?.text || {};
   const texts = config?.texts || {};

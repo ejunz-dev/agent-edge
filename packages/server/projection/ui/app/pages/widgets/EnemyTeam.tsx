@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function PlayerCard({ player }: { player: any }) {
@@ -97,6 +98,8 @@ interface EnemyTeamProps {
 }
 
 export default function EnemyTeam({ config }: EnemyTeamProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('enemyteam', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -104,8 +107,8 @@ export default function EnemyTeam({ config }: EnemyTeamProps) {
   const roundPhase = round?.phase || '';
   const player = state?.player || {};
 
-  // 预览模式下始终显示，否则只在 live 时显示
-  const shouldShow = isPreview || roundPhase === 'live';
+  // 预览模式下始终显示，否则根据事件系统或内部逻辑控制显示/隐藏
+  const shouldShow = isPreview || eventVisible || roundPhase === 'live';
 
   const { data } = useQuery({
     queryKey: ['faceit-match'],

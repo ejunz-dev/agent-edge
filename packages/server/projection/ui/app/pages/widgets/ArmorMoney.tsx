@@ -1,7 +1,9 @@
 import { Box, Group, Paper, Progress, Text, ThemeIcon } from '@mantine/core';
 import { IconShield } from '@tabler/icons-react';
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 interface ArmorMoneyProps {
@@ -9,12 +11,21 @@ interface ArmorMoneyProps {
 }
 
 export default function ArmorMoney({ config }: ArmorMoneyProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('armor', true, false);
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
+  
   const { state } = useCs2State();
   const player = state?.player || {};
   const armor = Number(player?.state?.armor ?? 0);
   const money = Number(player?.state?.money ?? 0);
 
   const style = config?.style || {};
+  
+  if (!isVisible && !isPreview) {
+    return null;
+  }
   const armorProgressConfig = config?.armorProgress || {};
   const iconConfig = config?.icon || {};
   const moneyTextConfig = config?.moneyText || {};

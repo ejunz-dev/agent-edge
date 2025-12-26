@@ -2,6 +2,7 @@ import { Group, Paper, Stack, Text, Title } from '@mantine/core';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function StatItem({ label, value, color = 'white' }: { label: string; value: React.ReactNode; color?: string }) {
@@ -22,6 +23,8 @@ interface RoundStatsProps {
 }
 
 export default function RoundStats({ config }: RoundStatsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('round', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -62,8 +65,8 @@ export default function RoundStats({ config }: RoundStatsProps) {
     }
   }, [roundPhase, currentRoundNumber, lastRoundNumber, shouldShow]);
 
-  // 预览模式下始终显示，否则根据条件显示
-  if (!isPreview && !shouldShow) {
+  // 预览模式下始终显示，否则根据条件显示（事件系统或内部逻辑）
+  if (!isPreview && !shouldShow && !eventVisible) {
     return null;
   }
 

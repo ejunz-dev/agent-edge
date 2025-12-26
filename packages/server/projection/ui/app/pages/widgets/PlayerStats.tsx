@@ -2,6 +2,7 @@ import { Group, Paper, Stack, Text, Title } from '@mantine/core';
 import React from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function StatItem({ label, value, color = 'white' }: { label: string; value: React.ReactNode; color?: string }) {
@@ -22,6 +23,8 @@ interface PlayerStatsProps {
 }
 
 export default function PlayerStats({ config }: PlayerStatsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('stats', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -38,6 +41,10 @@ export default function PlayerStats({ config }: PlayerStatsProps) {
   const kdRatio = deaths > 0 ? (kills / deaths).toFixed(2) : kills > 0 ? kills.toFixed(2) : '0.00';
 
   const style = config?.style || {};
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
 
   return (
     <Paper

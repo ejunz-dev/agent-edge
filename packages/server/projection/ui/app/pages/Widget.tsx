@@ -257,6 +257,21 @@ export default function Widget() {
     }
   }, [name]);
 
+  // 监听页面刷新通知（用于场景/事件配置更新时）
+  const handlePageRefresh = useCallback((data: { widgetNames: string[] } | any) => {
+    console.log(`[Widget] ${name} - 收到页面刷新通知:`, data);
+    const widgetNames = data?.widgetNames || (Array.isArray(data) ? data : []);
+    if (widgetNames.includes(name)) {
+      console.log(`[Widget] ${name} - 页面刷新通知匹配，刷新整个页面`);
+      // 延迟一下确保数据库已更新，然后刷新整个页面
+      setTimeout(() => {
+        window.location.reload();
+      }, 300);
+    } else {
+      console.log(`[Widget] ${name} - 页面刷新通知不匹配: 收到=${widgetNames.join(', ')}, 当前=${name}`);
+    }
+  }, [name]);
+
   // 监听 config 和 forceRefresh 变化，确保组件重新渲染
   useEffect(() => {
     if (config) {
@@ -269,6 +284,7 @@ export default function Widget() {
   }, [config, forceRefresh, name]);
   
   useProjectionMessage('widget/config/update', handleConfigUpdate);
+  useProjectionMessage('page/refresh', handlePageRefresh);
 
   // 定期检查配置更新（用于 OBS 浏览器源，因为可能不会触发事件）
   useEffect(() => {

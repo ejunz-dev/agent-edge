@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useProjectionMessage } from '../../hooks/useProjectionWebSocket';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 interface AgentStreamProps {
@@ -15,9 +16,15 @@ export default function AgentStream({ config }: AgentStreamProps) {
   const [content, setContent] = useState('');
   const contentRef = useRef<string>('');
   const hasContentRef = useRef(false); // 标记是否曾经收到过内容
-  const [isVisible, setIsVisible] = useState(false);
   const liveStartTimeRef = useRef<number | null>(null);
   const roundPhaseRef = useRef<string>(''); // 用于在回调中获取最新的 roundPhase
+  
+  // 使用事件系统控制可见性（默认不可见，由内容控制）
+  const { isVisible: eventVisible, setIsVisible: setEventVisible } = useEventSystem('agentstream', false, false);
+  const [manualVisible, setManualVisible] = useState(false);
+  
+  // 合并事件系统和手动控制的可见性
+  const isVisible = eventVisible || manualVisible;
   
   const { state } = useCs2State();
   const round = state?.round || {};
@@ -31,7 +38,7 @@ export default function AgentStream({ config }: AgentStreamProps) {
   // 预览模式下始终显示
   useEffect(() => {
     if (isPreview) {
-      setIsVisible(true);
+      setManualVisible(true);
       hasContentRef.current = true;
     }
   }, [isPreview]);
@@ -147,7 +154,7 @@ export default function AgentStream({ config }: AgentStreamProps) {
         contentRef.current = '';
         hasContentRef.current = false;
         setContent('');
-        setIsVisible(false);
+        setManualVisible(false);
         // 重置 live 开始时间，以便下次 live 阶段重新计时
         liveStartTimeRef.current = null;
       }, remainingTime);
@@ -161,24 +168,24 @@ export default function AgentStream({ config }: AgentStreamProps) {
     }
   }, [isLive, liveTimeout]);
 
-  // 控制显示/隐藏：有内容时显示，但 live 10 秒后强制隐藏
+  // 控制显示/隐藏：有内容时显示，但 live 10 秒后强制隐藏（保留原有逻辑作为后备）
   useEffect(() => {
     if (hasContentRef.current || content) {
       // 检查是否在 live 10 秒后
       if (isLive && liveStartTimeRef.current) {
         const elapsed = Date.now() - liveStartTimeRef.current;
-        if (elapsed >= 10000) {
-          // 已经超过 10 秒，隐藏
-          setIsVisible(false);
+        if (elapsed >= liveTimeout) {
+          // 已经超过超时时间，隐藏
+          setManualVisible(false);
           return;
         }
       }
-      // 有内容且不在 live 10 秒后，显示
-      setIsVisible(true);
+      // 有内容且不在 live 超时后，显示
+      setManualVisible(true);
     } else {
-      setIsVisible(false);
+      setManualVisible(false);
     }
-  }, [content, isLive]);
+  }, [content, isLive, liveTimeout]);
 
   // 预览模式下始终显示，否则根据条件显示
   if (!isPreview && (!isVisible || (!hasContentRef.current && !content))) {

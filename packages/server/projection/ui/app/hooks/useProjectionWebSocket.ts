@@ -31,17 +31,30 @@ class ProjectionWebSocketManager {
     this.ws.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data);
-        console.log('[ProjectionWebSocket] 收到消息:', msg.type, msg);
+        const timestamp = new Date().toLocaleTimeString();
+        
+        // 特殊处理事件触发消息，显示更详细的日志
+        if (msg.type === 'event/trigger') {
+          console.log(`[ProjectionWebSocket] 🎯 收到事件触发消息 [${timestamp}]`, {
+            eventId: msg.data?.eventId,
+            eventName: msg.data?.eventName,
+            actions: msg.data?.actions || [],
+            totalActions: msg.data?.actions?.length || 0,
+          });
+        } else {
+          console.log(`[ProjectionWebSocket] 📨 收到消息 [${timestamp}]:`, msg.type, msg);
+        }
+        
         // 通知所有监听器
         this.listeners.forEach((listener) => {
           try {
             listener(msg);
           } catch (e) {
-            console.error('[ProjectionWebSocket] 监听器错误:', e);
+            console.error('[ProjectionWebSocket] ❌ 监听器错误:', e);
           }
         });
       } catch (e) {
-        console.error('[ProjectionWebSocket] 解析消息失败:', e, ev.data);
+        console.error('[ProjectionWebSocket] ❌ 解析消息失败:', e, ev.data);
       }
     };
 

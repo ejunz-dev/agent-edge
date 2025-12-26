@@ -10,6 +10,8 @@ import Config from './pages/Config';
 import Chat from './pages/Chat';
 import Widget from './pages/Widget';
 import WidgetList from './pages/WidgetList';
+import SceneList from './pages/SceneList';
+import SceneDetail from './pages/SceneDetail';
 import MatchTeams from './pages/widgets/MatchTeams';
 
 function DefaultLayout() {
@@ -52,6 +54,8 @@ export default function App() {
           <Route path="chat" element={<Chat />} />
           <Route path="config" element={<Config />} />
           <Route path="widgets" element={<WidgetList />} />
+          <Route path="scenes" element={<SceneList />} />
+          <Route path="scenes/:id" element={<SceneDetail />} />
         </Route>
       </Routes>
       {/* 全局对局信息组件（在 freeze 时显示） */}

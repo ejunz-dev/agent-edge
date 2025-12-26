@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 function PlayerCard({ player }: { player: any }) {
@@ -94,6 +95,8 @@ interface MatchTeamsProps {
 }
 
 export default function MatchTeams({ config }: MatchTeamsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('matchteams', true, false);
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -103,9 +106,9 @@ export default function MatchTeams({ config }: MatchTeamsProps) {
   // 检查是否在 widget 页面中（通过 URL 判断）
   const isWidgetPage = window.location.pathname.includes('/widget/matchteams');
   
-  // 预览模式下始终显示，否则根据 round.phase 控制显示/隐藏
+  // 预览模式下始终显示，否则根据事件系统或内部逻辑控制显示/隐藏
   // freezetime = 冻结时间（回合开始前的准备时间）
-  const shouldShow = isPreview || isWidgetPage || roundPhase === 'freezetime' || roundPhase === 'warmup';
+  const shouldShow = isPreview || isWidgetPage || eventVisible || roundPhase === 'freezetime' || roundPhase === 'warmup';
 
   const { data, isLoading } = useQuery({
     queryKey: ['faceit-match'],

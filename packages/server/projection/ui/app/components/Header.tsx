@@ -4,7 +4,7 @@ import {
   Tabs, Text, Title,
 } from '@mantine/core';
 import {
-  IconDeviceTv, IconGauge, IconSettings, IconMessage, IconApps,
+  IconDeviceTv, IconGauge, IconSettings, IconMessage, IconApps, IconPhoto,
 } from '@tabler/icons-react';
 import React from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -16,6 +16,7 @@ const mainLinks = [
   { link: '/live', label: '直播页面', icon: <IconDeviceTv style={iconStyle} /> },
   { link: '/chat', label: 'Agent 对话', icon: <IconMessage style={iconStyle} /> },
   { link: '/widgets', label: '组件列表', icon: <IconApps style={iconStyle} /> },
+  { link: '/scenes', label: '场景管理', icon: <IconPhoto style={iconStyle} /> },
   { link: '/config', label: '配置', icon: <IconSettings style={iconStyle} /> },
 ];
 

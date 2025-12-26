@@ -3,6 +3,7 @@ import { IconBomb, IconClockHour4 } from '@tabler/icons-react';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 
 interface BombStatusProps {
@@ -10,6 +11,9 @@ interface BombStatusProps {
 }
 
 export default function BombStatus({ config }: BombStatusProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('bomb', true, false);
+  
   const [searchParams] = useSearchParams();
   const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
@@ -113,6 +117,10 @@ export default function BombStatus({ config }: BombStatusProps) {
   const displayPhaseCountdown = isPreview ? '10s' : (typeof phaseCountdown === 'string' ? phaseCountdown : null);
 
   const style = config?.style || {};
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
 
   return (
     <Paper

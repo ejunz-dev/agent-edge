@@ -1,7 +1,9 @@
 import { Box, Group, Paper, Progress, Text, ThemeIcon } from '@mantine/core';
 import { IconSword } from '@tabler/icons-react';
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
 import { WidgetConfig } from '../../utils/widgetConfig';
 import { getDataFieldValue, formatDisplayText } from '../../utils/widgetTextFields';
 
@@ -10,6 +12,11 @@ interface HealthBarProps {
 }
 
 export default function HealthBar({ config }: HealthBarProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('health', true, false);
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
+  
   const { state } = useCs2State();
   const hp = Number(getDataFieldValue(state, 'player.state.health') ?? 0);
 
@@ -31,6 +38,10 @@ export default function HealthBar({ config }: HealthBarProps) {
     hpValue,
     hpLabelConfig.fallback || 'HP 0'
   );
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
 
   return (
     <Paper

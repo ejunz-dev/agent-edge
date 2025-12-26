@@ -18,13 +18,79 @@ class Z2MStatusHandler extends Handler<Context> {
     }
 }
 
+// 展开多端点设备为独立设备
+function expandMultiEndpointDevices(devices: any[]): any[] {
+    const expanded: any[] = [];
+    
+    for (const device of devices) {
+        // 检测端点
+        const endpoints: string[] = [];
+        
+        // 从 definition.exposes 检测端点
+        if (device.definition?.exposes) {
+            for (const expose of device.definition.exposes) {
+                if (expose.endpoint) {
+                    endpoints.push(expose.endpoint);
+                }
+                if (expose.features && Array.isArray(expose.features)) {
+                    for (const feature of expose.features) {
+                        if (feature.endpoint && !endpoints.includes(feature.endpoint)) {
+                            endpoints.push(feature.endpoint);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 从 state 检测端点（state_l1, state_l2 等）
+        if (device.state) {
+            for (const key of Object.keys(device.state)) {
+                const match = key.match(/^state_l(\d+)$/);
+                if (match) {
+                    const endpoint = `l${match[1]}`;
+                    if (!endpoints.includes(endpoint)) {
+                        endpoints.push(endpoint);
+                    }
+                }
+            }
+        }
+        
+        // 如果有多个端点，展开为多个设备
+        if (endpoints.length > 0) {
+            const baseId = device.friendly_name || device.ieee_address;
+            for (const endpoint of endpoints.sort()) {
+                const endpointDevice = {
+                    ...device,
+                    friendly_name: `${baseId}_${endpoint}`,
+                    endpoint: endpoint,
+                    originalDeviceId: baseId,
+                    isEndpointDevice: true,
+                    // 提取该端点的状态
+                    state: {
+                        ...device.state,
+                        state: device.state?.[`state_${endpoint}`] || device.state?.state || 'OFF',
+                    },
+                };
+                expanded.push(endpointDevice);
+            }
+        } else {
+            // 单端点设备，直接添加
+            expanded.push(device);
+        }
+    }
+    
+    return expanded;
+}
+
 class Z2MDevicesHandler extends Handler<Context> {
     noCheckPermView = true;
     async get() {
         await this.ctx.inject(['zigbee2mqtt'], async (c) => {
             const svc = c.zigbee2mqtt as Zigbee2MqttService;
             const list = svc ? await svc.listDevices() : [];
-            this.response.body = { devices: list };
+            // 展开多端点设备
+            const expanded = expandMultiEndpointDevices(list);
+            this.response.body = { devices: expanded };
             this.response.addHeader('Access-Control-Allow-Origin', '*');
         });
     }
@@ -41,8 +107,30 @@ class Z2MControlHandler extends Handler<Context> {
                 const paramsId = (this as any).request?.params?.deviceId;
                 const id = typeof paramsId === 'string' ? paramsId : (typeof deviceId === 'string' ? deviceId : String(paramsId || deviceId || ''));
                 const body = this.request.body || {};
-                console.debug('[z2m-control] deviceId=%s body=%o', id, body);
-                await svc.setDeviceState(id, body);
+                
+                // 检查是否为端点设备（格式：设备名_l1）
+                let targetDeviceId = id;
+                let controlCommand: any = { ...body };
+                
+                const endpointMatch = id.match(/^(.+)_(l\d+)$/);
+                if (endpointMatch) {
+                    // 提取原始设备ID和端点
+                    targetDeviceId = endpointMatch[1];
+                    const endpoint = endpointMatch[2];
+                    
+                    // 如果 body 中有 state 属性，转换为端点特定的命令
+                    if (body.state !== undefined) {
+                        controlCommand = { [`state_${endpoint}`]: body.state };
+                        // 删除通用的 state 属性
+                        delete controlCommand.state;
+                    }
+                    
+                    console.debug('[z2m-control] 端点控制: 设备=%s, 端点=%s, 原始命令=%o, 转换后命令=%o', targetDeviceId, endpoint, body, controlCommand);
+                } else {
+                    console.debug('[z2m-control] 普通控制: deviceId=%s body=%o', id, body);
+                }
+                
+                await svc.setDeviceState(targetDeviceId, controlCommand);
                 this.response.body = { ok: 1 };
             } catch (err) {
                 this.response.status = 400;
@@ -69,11 +157,39 @@ class Z2MPermitJoinHandler extends Handler<Context> {
     }
 }
 
+class Z2MRefreshDevicesHandler extends Handler<Context> {
+    noCheckPermView = true;
+    allowCors = true;
+    async post() {
+        await this.ctx.inject(['zigbee2mqtt'], async (c) => {
+            const svc = c.zigbee2mqtt as Zigbee2MqttService;
+            try {
+                // 强制刷新设备列表
+                const devices = await svc.refreshDevices(10000);
+                
+                // 触发 zigbee2mqtt/devices 事件，让 node client 重新构建动态工具
+                this.ctx.parallel('zigbee2mqtt/devices', devices);
+                
+                this.response.body = { 
+                    ok: 1, 
+                    message: '设备列表已刷新',
+                    count: devices.length 
+                };
+            } catch (e) {
+                this.response.status = 500;
+                this.response.body = { error: (e as Error).message };
+            }
+            this.response.addHeader('Access-Control-Allow-Origin', '*');
+        });
+    }
+}
+
 export async function apply(ctx: Context) {
     ctx.Route('z2m-status', '/zigbee2mqtt/status', Z2MStatusHandler);
     ctx.Route('z2m-devices', '/zigbee2mqtt/devices', Z2MDevicesHandler);
     ctx.Route('z2m-control', '/zigbee2mqtt/device/:deviceId', Z2MControlHandler);
     ctx.Route('z2m-permit', '/zigbee2mqtt/permit_join', Z2MPermitJoinHandler);
+    ctx.Route('z2m-refresh', '/zigbee2mqtt/refresh', Z2MRefreshDevicesHandler);
     class Z2MCoordinatorHandler extends Handler<Context> {
         noCheckPermView = true;
         async get() {
@@ -195,5 +311,4 @@ export async function apply(ctx: Context) {
     }
     ctx.Route('z2m-all-raw', '/zigbee2mqtt/all_devices_raw', Z2MAllDevicesRawHandler);
 }
-
 

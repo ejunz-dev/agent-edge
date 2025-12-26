@@ -141,6 +141,98 @@ function connectToLocalMqttBroker(ctx?: Context) {
 
 // 注意：远程MQTT Broker连接已移除，所有通信通过Edge WebSocket进行
 
+// 检测设备是否有多个端点（多开关）
+function detectEndpoints(device: any): string[] {
+    const endpoints: string[] = [];
+    const deviceId = device.friendly_name || device.ieee_address;
+    
+    // 检查 definition.exposes 中的端点信息
+    if (device.definition?.exposes) {
+        const exposes = device.definition.exposes;
+        for (const expose of exposes) {
+            // 查找带有 endpoint 属性的开关
+            if (expose.endpoint) {
+                endpoints.push(expose.endpoint);
+                logger.debug('[detectEndpoints] %s: 在 exposes 中找到端点: %s', deviceId, expose.endpoint);
+            }
+            // 查找嵌套的 features
+            if (expose.features && Array.isArray(expose.features)) {
+                for (const feature of expose.features) {
+                    if (feature.endpoint && !endpoints.includes(feature.endpoint)) {
+                        endpoints.push(feature.endpoint);
+                        logger.debug('[detectEndpoints] %s: 在 features 中找到端点: %s', deviceId, feature.endpoint);
+                    }
+                }
+            }
+        }
+    }
+    
+    // 检查设备状态中的 state_l1, state_l2 等属性
+    if (device.state || device.state === undefined) {
+        const state = device.state || {};
+        const stateKeys = Object.keys(state);
+        for (const key of stateKeys) {
+            // 匹配 state_l1, state_l2, state_l3 等模式
+            const match = key.match(/^state_l(\d+)$/);
+            if (match) {
+                const endpoint = `l${match[1]}`;
+                if (!endpoints.includes(endpoint)) {
+                    endpoints.push(endpoint);
+                    logger.debug('[detectEndpoints] %s: 在 state 中找到端点: %s', deviceId, endpoint);
+                }
+            }
+        }
+    }
+    
+    // 如果没有找到端点，返回空数组
+    if (endpoints.length > 0) {
+        logger.info('[detectEndpoints] %s: 检测到 %d 个端点: %o', deviceId, endpoints.length, endpoints);
+    }
+    return endpoints.sort();
+}
+
+// 为多端点设备创建虚拟子设备
+function expandMultiEndpointDevice(device: any, endpoints: string[]): any[] {
+    const devices: any[] = [];
+    const baseId = device.friendly_name || device.ieee_address;
+    
+    for (const endpoint of endpoints) {
+        const endpointDevice = {
+            ...device,
+            friendly_name: `${baseId}_${endpoint}`,
+            ieee_address: device.ieee_address,
+            endpoint: endpoint,
+            originalDeviceId: baseId,
+            isEndpointDevice: true,
+            // 提取该端点的状态
+            state: extractEndpointState(device.state, endpoint),
+        };
+        devices.push(endpointDevice);
+    }
+    
+    return devices;
+}
+
+// 提取特定端点的状态
+function extractEndpointState(state: any, endpoint: string): any {
+    if (!state) return {};
+    
+    const endpointState: any = {};
+    const stateKey = `state_${endpoint}`;
+    
+    // 如果有 state_l1, state_l2 等属性，提取该端点的状态
+    if (state[stateKey] !== undefined) {
+        endpointState.state = state[stateKey];
+    }
+    
+    // 复制其他可能相关的属性（如 linkquality 等）
+    if (state.linkquality !== undefined) {
+        endpointState.linkquality = state.linkquality;
+    }
+    
+    return endpointState;
+}
+
 // 发送设备发现消息
 async function sendDeviceDiscovery(ctx: Context, client: any, nodeId: number) {
     try {
@@ -154,38 +246,83 @@ async function sendDeviceDiscovery(ctx: Context, client: any, nodeId: number) {
             const devices = await z2mSvc.listDevices();
             logger.info('准备发送设备发现消息，共 %d 个设备', devices.length);
             
-            // 转换设备格式
-            const deviceList = devices.map((d: any) => {
-                const deviceId = d.friendly_name || d.ieee_address;
-                const state: any = {};
+            // 转换设备格式，展开多端点设备
+            const deviceList: any[] = [];
+            for (const d of devices) {
+                // 检测设备是否有多个端点
+                const endpoints = detectEndpoints(d);
                 
-                // 从设备信息中提取状态
-                if (d.state) {
-                    Object.assign(state, d.state);
+                if (endpoints.length > 0) {
+                    // 多端点设备：为每个端点创建一个虚拟设备
+                    logger.info('检测到多端点设备: %s，端点: %o', d.friendly_name || d.ieee_address, endpoints);
+                    const endpointDevices = expandMultiEndpointDevice(d, endpoints);
+                    
+                    for (const ed of endpointDevices) {
+                        const deviceId = ed.friendly_name || ed.ieee_address;
+                        const state: any = {};
+                        
+                        // 从设备信息中提取状态
+                        if (ed.state) {
+                            Object.assign(state, ed.state);
+                        }
+                        
+                        // 构建能力列表
+                        const capabilities: string[] = [];
+                        if (ed.supportsOnOff !== false) {
+                            capabilities.push('on', 'off');
+                        }
+                        if (ed.state?.brightness !== undefined) {
+                            capabilities.push('brightness');
+                        }
+                        if (ed.state?.color !== undefined) {
+                            capabilities.push('color');
+                        }
+                        
+                        deviceList.push({
+                            id: deviceId,
+                            name: ed.friendly_name || deviceId,
+                            type: ed.type === 'Router' ? 'router' : (ed.type === 'EndDevice' ? 'enddevice' : 'unknown'),
+                            manufacturer: ed.definition?.vendor || ed.vendor || '未知厂商',
+                            model: ed.definition?.model || ed.model || '未知型号',
+                            state: state,
+                            capabilities: capabilities.length > 0 ? capabilities : ['on', 'off'],
+                            endpoint: ed.endpoint,
+                            originalDeviceId: ed.originalDeviceId,
+                        });
+                    }
+                } else {
+                    // 单端点设备：正常处理
+                    const deviceId = d.friendly_name || d.ieee_address;
+                    const state: any = {};
+                    
+                    // 从设备信息中提取状态
+                    if (d.state) {
+                        Object.assign(state, d.state);
+                    }
+                    
+                    // 构建能力列表
+                    const capabilities: string[] = [];
+                    if (d.supportsOnOff !== false) {
+                        capabilities.push('on', 'off');
+                    }
+                    if (d.state?.brightness !== undefined) {
+                        capabilities.push('brightness');
+                    }
+                    if (d.state?.color !== undefined) {
+                        capabilities.push('color');
+                    }
+                    
+                    deviceList.push({
+                        id: deviceId,
+                        name: d.friendly_name || deviceId,
+                        type: d.type === 'Router' ? 'router' : (d.type === 'EndDevice' ? 'enddevice' : 'unknown'),
+                        manufacturer: d.definition?.vendor || d.vendor || '未知厂商',
+                        model: d.definition?.model || d.model || '未知型号',
+                        state: state,
+                        capabilities: capabilities.length > 0 ? capabilities : ['on', 'off'],
+                    });
                 }
-                
-                // 构建能力列表
-                const capabilities: string[] = [];
-                if (d.supportsOnOff !== false) {
-                    capabilities.push('on', 'off');
-                }
-                if (d.state?.brightness !== undefined) {
-                    capabilities.push('brightness');
-                }
-                if (d.state?.color !== undefined) {
-                    capabilities.push('color');
-                }
-                
-                return {
-                    id: deviceId,
-                    name: d.friendly_name || deviceId,
-                    type: d.type === 'Router' ? 'router' : (d.type === 'EndDevice' ? 'enddevice' : 'unknown'),
-                    manufacturer: d.definition?.vendor || d.vendor || '未知厂商',
-                    model: d.definition?.model || d.model || '未知型号',
-                    state: state,
-                    capabilities: capabilities.length > 0 ? capabilities : ['on', 'off'],
-                };
-            });
+            }
             
             const topic = `node/${nodeId}/devices/discover`;
             const payload = JSON.stringify({ devices: deviceList });
@@ -214,8 +351,32 @@ async function executeDeviceControl(ctx: Context, deviceId: string, command: any
                 return;
             }
             
-            logger.info('执行设备控制: %s, 命令: %o', deviceId, command);
-            await z2mSvc.setDeviceState(deviceId, command);
+            // 检查 deviceId 是否包含端点信息（格式：deviceName_l1）
+            let targetDeviceId = deviceId;
+            let endpoint: string | undefined;
+            
+            const endpointMatch = deviceId.match(/^(.+)_(l\d+)$/);
+            if (endpointMatch) {
+                // 提取原始设备ID和端点
+                targetDeviceId = endpointMatch[1];
+                endpoint = endpointMatch[2];
+                logger.info('检测到端点控制: 设备=%s, 端点=%s', targetDeviceId, endpoint);
+            }
+            
+            // 构建控制命令
+            let controlCommand = { ...command };
+            if (endpoint) {
+                // 对于多端点设备，需要使用特定的状态键
+                // 例如：{ state_l1: "ON" } 而不是 { state: "ON" }
+                if (command.state !== undefined) {
+                    controlCommand = { [`state_${endpoint}`]: command.state };
+                    // 删除通用的 state 属性
+                    delete controlCommand.state;
+                }
+            }
+            
+            logger.info('执行设备控制: %s, 命令: %o', targetDeviceId, controlCommand);
+            await z2mSvc.setDeviceState(targetDeviceId, controlCommand);
             logger.success('设备控制执行成功: %s', deviceId);
         });
     } catch (e) {
@@ -787,70 +948,140 @@ export function buildDynamicToolEntries(devices: any[], nodeId: string): NodeToo
     const entries: NodeToolRegistryEntry[] = [];
     const seenTargets = new Set<string>();
     const sanitizedNode = sanitizeIdentifier(nodeId);
+    
+    logger.info('[buildDynamicToolEntries] 开始处理 %d 个设备', devices?.length || 0);
+    
     for (const device of devices || []) {
         const controlTargetId = device?.friendly_name || device?.ieee_address || device?.id;
         if (!controlTargetId) continue;
         if (seenTargets.has(controlTargetId)) continue;
-        if (!hasSwitchCapability(device)) continue;
+        if (!hasSwitchCapability(device)) {
+            logger.debug('[buildDynamicToolEntries] 跳过设备 %s (无开关能力)', controlTargetId);
+            continue;
+        }
         seenTargets.add(controlTargetId);
+        
+        logger.debug('[buildDynamicToolEntries] 处理设备: %s', controlTargetId);
 
-        const sanitizedDevice = sanitizeIdentifier(controlTargetId);
-        const hashSource = `${nodeId}:${device?.ieee_address || controlTargetId}`;
-        const uniqueSuffix = crypto.createHash('sha1').update(hashSource).digest('hex').slice(0, 6);
-        const toolName = `node_${sanitizedNode}_${sanitizedDevice}_${uniqueSuffix}_switch`;
-        const actions = ['ON', 'OFF', 'TOGGLE'];
-        const defaultDescription = `控制设备 ${device?.friendly_name || controlTargetId} 的开关`;
-        const parameters = {
-            type: 'object',
-            properties: {
-                state: {
-                    type: 'string',
-                    enum: actions,
-                    description: '开关状态：ON=开启，OFF=关闭，TOGGLE=切换当前状态',
-                },
-            },
-            required: ['state'],
-        };
-        const metadata = {
-            category: 'zigbee-switch',
-            nodeId,
-            deviceId: controlTargetId,
-            friendlyName: device?.friendly_name || controlTargetId,
-            ieeeAddress: device?.ieee_address || controlTargetId,
-            model: device?.definition?.model || device?.model || '',
-            vendor: device?.definition?.vendor || device?.vendor || '',
-            actions,
-            defaultDescription,
-            autoGenerated: true,
-            docId: `node:${nodeId}:${toolName}`,
-        };
-        const entry: NodeToolRegistryEntry = {
-            tool: {
-                name: toolName,
-                description: defaultDescription,
-                inputSchema: parameters,
-                metadata,
-            },
-            handler: async (ctx: Context, args: any) => {
-                const stateRaw = args?.state;
-                const normalizedState = String(stateRaw ?? '').trim().toUpperCase();
-                if (!normalizedState) throw new Error('缺少 state 参数');
-                if (!actions.includes(normalizedState)) {
-                    throw new Error(`state 必须是 ${actions.join(', ')} 之一`);
-                }
-                await callZigbeeControlTool(ctx, { deviceId: controlTargetId, state: normalizedState });
-                return {
-                    success: true,
-                    deviceId: controlTargetId,
-                    state: normalizedState,
-                    friendlyName: metadata.friendlyName,
+        // 检测是否为多端点设备
+        const endpoints = detectEndpoints(device);
+        
+        if (endpoints.length > 0) {
+            // 为每个端点创建独立的工具
+            for (const endpoint of endpoints) {
+                const endpointDeviceId = `${controlTargetId}_${endpoint}`;
+                const sanitizedDevice = sanitizeIdentifier(endpointDeviceId);
+                const hashSource = `${nodeId}:${device?.ieee_address || controlTargetId}:${endpoint}`;
+                const uniqueSuffix = crypto.createHash('sha1').update(hashSource).digest('hex').slice(0, 6);
+                const toolName = `node_${sanitizedNode}_${sanitizedDevice}_${uniqueSuffix}_switch`;
+                const actions = ['ON', 'OFF', 'TOGGLE'];
+                const defaultDescription = `控制设备 ${device?.friendly_name || controlTargetId} 端点 ${endpoint} 的开关`;
+                const parameters = {
+                    type: 'object',
+                    properties: {
+                        state: {
+                            type: 'string',
+                            enum: actions,
+                            description: '开关状态：ON=开启，OFF=关闭，TOGGLE=切换当前状态',
+                        },
+                    },
+                    required: ['state'],
                 };
-            },
-            metadata,
-            autoGenerated: true,
-        };
-        (entry.tool as any).parameters = parameters;
-        entries.push(entry);
+                const metadata = {
+                    category: 'zigbee-switch',
+                    nodeId,
+                    deviceId: endpointDeviceId,
+                    originalDeviceId: controlTargetId,
+                    endpoint: endpoint,
+                    friendlyName: `${device?.friendly_name || controlTargetId}_${endpoint}`,
+                    ieeeAddress: device?.ieee_address || controlTargetId,
+                    model: device?.definition?.model || device?.model || '',
+                    vendor: device?.definition?.vendor || device?.vendor || '',
+                    actions,
+                    defaultDescription,
+                    autoGenerated: true,
+                    docId: `node:${nodeId}:${toolName}`,
+                };
+                const entry: NodeToolRegistryEntry = {
+                    tool: {
+                        name: toolName,
+                        description: defaultDescription,
+                        inputSchema: parameters,
+                        metadata,
+                    },
+                    handler: async (args: any) => {
+                        logger.info('[%s] 调用工具: %o', toolName, args);
+                        const { state } = args;
+                        if (!state) throw new Error('缺少必要参数：state');
+                        if (!actions.includes(state)) {
+                            throw new Error(`state 必须是 ${actions.join(', ')} 之一`);
+                        }
+                        await callZigbeeControlTool(ctx, { deviceId: endpointDeviceId, state });
+                        return { success: true, deviceId: endpointDeviceId, state };
+                    },
+                };
+                entries.push(entry);
+            }
+        } else {
+            // 单端点设备：保持原有逻辑
+            const sanitizedDevice = sanitizeIdentifier(controlTargetId);
+            const hashSource = `${nodeId}:${device?.ieee_address || controlTargetId}`;
+            const uniqueSuffix = crypto.createHash('sha1').update(hashSource).digest('hex').slice(0, 6);
+            const toolName = `node_${sanitizedNode}_${sanitizedDevice}_${uniqueSuffix}_switch`;
+            const actions = ['ON', 'OFF', 'TOGGLE'];
+            const defaultDescription = `控制设备 ${device?.friendly_name || controlTargetId} 的开关`;
+            const parameters = {
+                type: 'object',
+                properties: {
+                    state: {
+                        type: 'string',
+                        enum: actions,
+                        description: '开关状态：ON=开启，OFF=关闭，TOGGLE=切换当前状态',
+                    },
+                },
+                required: ['state'],
+            };
+            const metadata = {
+                category: 'zigbee-switch',
+                nodeId,
+                deviceId: controlTargetId,
+                friendlyName: device?.friendly_name || controlTargetId,
+                ieeeAddress: device?.ieee_address || controlTargetId,
+                model: device?.definition?.model || device?.model || '',
+                vendor: device?.definition?.vendor || device?.vendor || '',
+                actions,
+                defaultDescription,
+                autoGenerated: true,
+                docId: `node:${nodeId}:${toolName}`,
+            };
+            const entry: NodeToolRegistryEntry = {
+                tool: {
+                    name: toolName,
+                    description: defaultDescription,
+                    inputSchema: parameters,
+                    metadata,
+                },
+                handler: async (ctx: Context, args: any) => {
+                    const stateRaw = args?.state;
+                    const normalizedState = String(stateRaw ?? '').trim().toUpperCase();
+                    if (!normalizedState) throw new Error('缺少 state 参数');
+                    if (!actions.includes(normalizedState)) {
+                        throw new Error(`state 必须是 ${actions.join(', ')} 之一`);
+                    }
+                    await callZigbeeControlTool(ctx, { deviceId: controlTargetId, state: normalizedState });
+                    return {
+                        success: true,
+                        deviceId: controlTargetId,
+                        state: normalizedState,
+                        friendlyName: metadata.friendlyName,
+                    };
+                },
+                metadata,
+                autoGenerated: true,
+            };
+            (entry.tool as any).parameters = parameters;
+            entries.push(entry);
+        }
     }
     return entries;
 }

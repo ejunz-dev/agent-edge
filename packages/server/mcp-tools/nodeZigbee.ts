@@ -191,16 +191,46 @@ export async function callZigbeeControlTool(ctx: Context, args: any): Promise<an
         if (!svc) {
             throw new Error('Zigbee2MQTT 服务未初始化');
         }
-        // zigbee2mqtt 使用 friendly_name 或 ieee_address 作为设备ID
-        // 先尝试通过 friendly_name 查找设备
-        const devices = await svc.listDevices();
-        const device = devices.find((d: any) => 
-            d.friendly_name === deviceId || 
-            d.ieee_address === deviceId ||
-            String(d.friendly_name).toLowerCase() === String(deviceId).toLowerCase()
-        );
-        const targetDeviceId = device ? (device.friendly_name || device.ieee_address) : deviceId;
-        await svc.setDeviceState(targetDeviceId, { state });
+        
+        // 检查 deviceId 是否包含端点信息（格式：deviceName_l1）
+        let targetDeviceId = deviceId;
+        let endpoint: string | undefined;
+        
+        const endpointMatch = deviceId.match(/^(.+)_(l\d+)$/);
+        if (endpointMatch) {
+            // 提取原始设备ID和端点
+            const baseDeviceId = endpointMatch[1];
+            endpoint = endpointMatch[2];
+            logger.info('[zigbee_control_device] 检测到端点控制: 设备=%s, 端点=%s', baseDeviceId, endpoint);
+            
+            // 查找原始设备
+            const devices = await svc.listDevices();
+            const device = devices.find((d: any) => 
+                d.friendly_name === baseDeviceId || 
+                d.ieee_address === baseDeviceId ||
+                String(d.friendly_name).toLowerCase() === String(baseDeviceId).toLowerCase()
+            );
+            targetDeviceId = device ? (device.friendly_name || device.ieee_address) : baseDeviceId;
+        } else {
+            // 单端点设备：正常查找
+            const devices = await svc.listDevices();
+            const device = devices.find((d: any) => 
+                d.friendly_name === deviceId || 
+                d.ieee_address === deviceId ||
+                String(d.friendly_name).toLowerCase() === String(deviceId).toLowerCase()
+            );
+            targetDeviceId = device ? (device.friendly_name || device.ieee_address) : deviceId;
+        }
+        
+        // 构建控制命令
+        let controlCommand: any = { state };
+        if (endpoint) {
+            // 对于多端点设备，使用特定的状态键
+            controlCommand = { [`state_${endpoint}`]: state };
+        }
+        
+        logger.info('[zigbee_control_device] 发送控制命令: %s -> %o', targetDeviceId, controlCommand);
+        await svc.setDeviceState(targetDeviceId, controlCommand);
     });
     
     const result = {

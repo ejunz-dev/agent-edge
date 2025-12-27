@@ -1,6 +1,9 @@
 import { Group, Paper, Stack, Text } from '@mantine/core';
 import React from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
+import { WidgetConfig } from '../../utils/widgetConfig';
 
 function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -15,7 +18,37 @@ function InfoRow({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
-export default function Weapons() {
+interface WeaponsProps {
+  config?: WidgetConfig;
+}
+
+export default function Weapons({ config }: WeaponsProps) {
+  // 使用事件系统控制可见性（默认可见，事件可以控制）
+  const { isVisible } = useEventSystem('weapons', true, false);
+
+  // 调试日志：组件渲染和可见性变化
+  React.useEffect(() => {
+    console.log('[Weapons] 组件渲染，配置:', {
+      minWidth: config?.style?.minWidth,
+      padding: config?.style?.padding,
+      stylePreset: config?.stylePreset,
+      showIcon: config?.showIcon,
+      showText: config?.showText,
+      isVisible,
+      willRender: isVisible || false,
+    });
+  }, [config, isVisible]);
+  
+  // 单独监听可见性变化
+  React.useEffect(() => {
+    console.log('[Weapons] ⚡ 可见性状态变化:', {
+      isVisible,
+      timestamp: new Date().toLocaleTimeString(),
+    });
+  }, [isVisible]);
+
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
   const player = state?.player || {};
   const weapons = player?.weapons || {};
@@ -51,23 +84,49 @@ export default function Weapons() {
       .join(' / ');
   })();
 
+  const style = config?.style || {};
+
+  // 构建样式对象，避免 border 和 borderColor 冲突
+  const paperStyle: React.CSSProperties = {
+    minWidth: style.minWidth || 240,
+    background: style.background || 'rgba(15, 15, 20, 0.74)',
+    backdropFilter: style.backdropFilter || 'blur(12px)',
+  };
+
+  // 如果设置了完整的 border，使用它；否则使用 borderColor
+  if (style.border) {
+    paperStyle.border = style.border;
+  } else {
+    paperStyle.borderColor = style.borderColor || 'rgba(255, 255, 255, 0.12)';
+  }
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
+
   return (
     <Paper
-      shadow="xl"
-      radius="md"
-      p="md"
-      withBorder
-      style={{
-        minWidth: 240,
-        background: 'rgba(15, 15, 20, 0.74)',
-        borderColor: 'rgba(255, 255, 255, 0.12)',
-        backdropFilter: 'blur(12px)',
-      }}
+      shadow={style.shadow || 'xl'}
+      radius={style.borderRadius || 'md'}
+      p={style.padding || 'md'}
+      withBorder={!style.border} // 如果设置了自定义 border，不使用 withBorder
+      style={paperStyle}
     >
       <Stack gap={4}>
-        <InfoRow label="当前武器" value={activeWeaponText} />
-        <InfoRow label="副武器" value={secondaryWeaponText} />
-        <InfoRow label="道具" value={grenadeSummary} />
+        {config?.showText !== false && (
+          <>
+            <InfoRow label={config?.showIcon === false ? "" : "当前武器"} value={isPreview ? 'AK-47 30/90' : activeWeaponText} />
+            <InfoRow label={config?.showIcon === false ? "" : "副武器"} value={isPreview ? 'Glock-18 20/120' : secondaryWeaponText} />
+            <InfoRow label={config?.showIcon === false ? "" : "道具"} value={isPreview ? 'HE Grenade / Flashbang x2' : grenadeSummary} />
+          </>
+        )}
+        {config?.showText === false && config?.showIcon === true && (
+          <Group gap="xs">
+            <Text size="lg">🔫</Text>
+            <Text size="lg">🔫</Text>
+            <Text size="lg">💣</Text>
+          </Group>
+        )}
       </Stack>
     </Paper>
   );

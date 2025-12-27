@@ -3,6 +3,8 @@ import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
+import { WidgetConfig } from '../../utils/widgetConfig';
 
 function StatItem({ label, value, color = 'white' }: { label: string; value: React.ReactNode; color?: string }) {
   return (
@@ -17,16 +19,23 @@ function StatItem({ label, value, color = 'white' }: { label: string; value: Rea
   );
 }
 
-export default function FaceitStats() {
+interface FaceitStatsProps {
+  config?: WidgetConfig;
+}
+
+export default function FaceitStats({ config }: FaceitStatsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('faceit', true, false);
   const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
   const nickname = searchParams.get('nickname') || '';
   const { state } = useCs2State();
   const round = state?.round || {};
   const roundPhase = round?.phase || '';
 
-  // 根据 round.phase 控制显示/隐藏
+  // 预览模式下始终显示，否则根据 round.phase 控制显示/隐藏（事件系统或内部逻辑）
   // freezetime = 冻结时间（回合开始前的准备时间）
-  const shouldShow = roundPhase === 'freezetime' || roundPhase === 'warmup';
+  const shouldShow = isPreview || eventVisible || roundPhase === 'freezetime' || roundPhase === 'warmup';
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['faceit-stats', nickname],
@@ -45,18 +54,21 @@ export default function FaceitStats() {
     retry: 2,
   });
 
-  if (isLoading) {
+  const style = config?.style || {};
+
+  if (isLoading && !isPreview) {
     return (
       <Paper
-        shadow="xl"
-        radius="md"
-        p="md"
+        shadow={style.shadow || 'xl'}
+        radius={style.borderRadius || 'md'}
+        p={style.padding || 'md'}
         withBorder
         style={{
-          minWidth: 400,
-          background: 'rgba(15, 15, 20, 0.74)',
-          borderColor: 'rgba(255, 255, 255, 0.12)',
-          backdropFilter: 'blur(12px)',
+          minWidth: style.minWidth || 400,
+          background: style.background || 'rgba(15, 15, 20, 0.74)',
+          borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
+          backdropFilter: style.backdropFilter || 'blur(12px)',
+          border: style.border,
         }}
       >
         <Text c="dimmed" ta="center">加载 Faceit 数据中...</Text>
@@ -64,18 +76,19 @@ export default function FaceitStats() {
     );
   }
 
-  if (error || !data?.ok) {
+  if ((error || !data?.ok) && !isPreview) {
     return (
       <Paper
-        shadow="xl"
-        radius="md"
-        p="md"
+        shadow={style.shadow || 'xl'}
+        radius={style.borderRadius || 'md'}
+        p={style.padding || 'md'}
         withBorder
         style={{
-          minWidth: 400,
-          background: 'rgba(15, 15, 20, 0.74)',
-          borderColor: 'rgba(255, 255, 255, 0.12)',
-          backdropFilter: 'blur(12px)',
+          minWidth: style.minWidth || 400,
+          background: style.background || 'rgba(15, 15, 20, 0.74)',
+          borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
+          backdropFilter: style.backdropFilter || 'blur(12px)',
+          border: style.border,
         }}
       >
         <Text c="red" ta="center">
@@ -85,9 +98,19 @@ export default function FaceitStats() {
     );
   }
 
-  const player = data.player || {};
-  const stats = data.stats || {};
-  const today = data.today || { wins: 0, losses: 0, eloChange: 0 };
+  // 预览模式下使用示例数据
+  const player = isPreview ? {
+    nickname: 'ExamplePlayer',
+    elo: 2500,
+    avatar: null,
+  } : (data?.player || {});
+  const stats = isPreview ? {
+    'Average K/D Ratio': '1.5',
+    'Average Headshots %': '45',
+    'Win Rate %': '60',
+    'Total Kills': '12500',
+  } : (data?.stats || {});
+  const today = isPreview ? { wins: 5, losses: 2, eloChange: 25 } : (data?.today || { wins: 0, losses: 0, eloChange: 0 });
 
   // 计算统计数据
   const kills = stats['Average K/D Ratio'] ? parseFloat(stats['Average K/D Ratio']) : 0;
@@ -97,15 +120,18 @@ export default function FaceitStats() {
 
   return (
     <Paper
-      shadow="xl"
-      radius="md"
-      p="lg"
+      shadow={style.shadow || 'xl'}
+      radius={style.borderRadius || 'md'}
+      p={style.padding || 'lg'}
       withBorder={false}
       style={{
         width: 'fit-content',
-        background: 'rgba(30, 30, 35, 0.95)',
-        borderColor: 'rgba(255, 255, 255, 0.12)',
-        boxShadow: '0 4px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05) inset',
+        minWidth: style.minWidth || 400,
+        background: style.background || 'rgba(30, 30, 35, 0.95)',
+        borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
+        backdropFilter: style.backdropFilter || 'none',
+        boxShadow: style.shadow ? undefined : '0 4px 20px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.05) inset',
+        border: style.border,
       }}
     >
       <Stack gap="md">

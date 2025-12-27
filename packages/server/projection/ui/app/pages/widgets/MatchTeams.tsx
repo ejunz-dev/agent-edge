@@ -1,7 +1,10 @@
 import { Avatar, Box, Group, Paper, Stack, Text } from '@mantine/core';
 import { useQuery } from '@tanstack/react-query';
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
+import { WidgetConfig } from '../../utils/widgetConfig';
 
 function PlayerCard({ player }: { player: any }) {
   const stats = player.stats || {};
@@ -87,17 +90,25 @@ function PlayerCard({ player }: { player: any }) {
   );
 }
 
-export default function MatchTeams() {
+interface MatchTeamsProps {
+  config?: any;
+}
+
+export default function MatchTeams({ config }: MatchTeamsProps) {
+  // 使用事件系统控制可见性
+  const { isVisible: eventVisible } = useEventSystem('matchteams', true, false);
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
   const round = state?.round || {};
   const roundPhase = round?.phase || '';
 
   // 检查是否在 widget 页面中（通过 URL 判断）
-  const isWidgetPage = window.location.hash.includes('/widget/matchteams');
+  const isWidgetPage = window.location.pathname.includes('/widget/matchteams');
   
-  // 根据 round.phase 控制显示/隐藏（在 widget 页面中始终显示用于调试）
+  // 预览模式下始终显示，否则根据事件系统或内部逻辑控制显示/隐藏
   // freezetime = 冻结时间（回合开始前的准备时间）
-  const shouldShow = isWidgetPage || roundPhase === 'freezetime' || roundPhase === 'warmup';
+  const shouldShow = isPreview || isWidgetPage || eventVisible || roundPhase === 'freezetime' || roundPhase === 'warmup';
 
   const { data, isLoading } = useQuery({
     queryKey: ['faceit-match'],
@@ -188,9 +199,8 @@ export default function MatchTeams() {
     };
   }
   
-  // 在 widget 页面中，始终显示左右两侧的框架（即使没有数据）
-  // 在非 widget 页面中，只有在满足条件时才显示
-  const shouldRender = isWidgetPage || isVisible;
+  // 预览模式下始终显示，否则根据条件显示
+  const shouldRender = isPreview || isWidgetPage || isVisible;
   
   if (!shouldRender) {
     return null;

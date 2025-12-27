@@ -1,9 +1,21 @@
 import { Badge, Group, Paper, RingProgress, Text, ThemeIcon } from '@mantine/core';
 import { IconBomb, IconClockHour4 } from '@tabler/icons-react';
 import React, { useEffect, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useCs2State } from '../../hooks/useCs2State';
+import { useEventSystem } from '../../hooks/useEventSystem';
+import { WidgetConfig } from '../../utils/widgetConfig';
 
-export default function BombStatus() {
+interface BombStatusProps {
+  config?: WidgetConfig;
+}
+
+export default function BombStatus({ config }: BombStatusProps) {
+  // 使用事件系统控制可见性
+  const { isVisible } = useEventSystem('bomb', true, false);
+  
+  const [searchParams] = useSearchParams();
+  const isPreview = searchParams.get('preview') === 'true';
   const { state } = useCs2State();
   const round = state?.round || {};
   const bomb = state?.bomb || {};
@@ -96,60 +108,93 @@ export default function BombStatus() {
     ? Math.max(0, Math.min(100, (bombSecondsLeft / bombTotalTime) * 100))
     : null;
 
+  // 预览模式下显示示例数据
+  const displayBombText = isPreview ? '炸弹已安放' : bombText;
+  const displayBombColor = isPreview ? 'red' : bombColor;
+  const displayBombProgress = isPreview ? 50 : bombProgress;
+  const displayBombSecondsLeft = isPreview ? 19.0 : bombSecondsLeft;
+  const displayRoundPhase = isPreview ? 'LIVE' : roundPhase.toUpperCase();
+  const displayPhaseCountdown = isPreview ? '10s' : (typeof phaseCountdown === 'string' ? phaseCountdown : null);
+
+  const style = config?.style || {};
+
+  if (!isVisible && !isPreview) {
+    return null;
+  }
+
   return (
     <Paper
-      shadow="xl"
-      radius="md"
-      p="md"
+      shadow={style.shadow || 'xl'}
+      radius={style.borderRadius || 'md'}
+      p={style.padding || 'md'}
       withBorder
       style={{
-        minWidth: 320,
-        background: 'rgba(15, 15, 20, 0.74)',
-        borderColor: 'rgba(255, 255, 255, 0.12)',
-        backdropFilter: 'blur(12px)',
+        minWidth: style.minWidth || 320,
+        background: style.background || 'rgba(15, 15, 20, 0.74)',
+        borderColor: style.borderColor || 'rgba(255, 255, 255, 0.12)',
+        backdropFilter: style.backdropFilter || 'blur(12px)',
+        border: style.border,
       }}
     >
       <Group gap="md" align="center">
-        <ThemeIcon variant="subtle" radius="xl" color="gray" size="sm">
-          <IconClockHour4 size={14} />
-        </ThemeIcon>
-        <Text size="xs" c="gray.2">
-          {roundPhase.toUpperCase()}
-          {typeof phaseCountdown === 'string' && ` · ${phaseCountdown}s`}
-        </Text>
+        {config?.showIcon !== false && config?.showText !== false && (
+          <>
+            <ThemeIcon variant="subtle" radius="xl" color="gray" size="sm">
+              <IconClockHour4 size={14} />
+            </ThemeIcon>
+            <Text size="xs" c="gray.2">
+              {displayRoundPhase}
+              {displayPhaseCountdown && ` · ${displayPhaseCountdown}`}
+            </Text>
+          </>
+        )}
+        {config?.showIcon === true && config?.showText === false && (
+          <ThemeIcon variant="subtle" radius="xl" color="gray" size="lg">
+            <IconBomb size={24} />
+          </ThemeIcon>
+        )}
+        {config?.showText === true && config?.showIcon === false && (
+          <Text size="sm" c="gray.2" fw={700}>
+            {displayRoundPhase} {displayBombText || ''}
+          </Text>
+        )}
 
-        {bombText && (
+        {(displayBombText || isPreview) && config?.showText !== false && config?.showIcon !== false && (
           <Badge
-            leftSection={<IconBomb size={12} />}
-            color={bombColor}
+            leftSection={config?.showIcon !== false ? <IconBomb size={12} /> : undefined}
+            color={displayBombColor}
             radius="sm"
             variant="filled"
             style={{
-              boxShadow: bombFlashOn ? '0 0 14px rgba(255, 80, 80, 0.9)' : 'none',
-              transform: bombFlashOn ? 'scale(1.03)' : 'scale(1)',
+              boxShadow: (bombFlashOn || isPreview) ? '0 0 14px rgba(255, 80, 80, 0.9)' : 'none',
+              transform: (bombFlashOn || isPreview) ? 'scale(1.03)' : 'scale(1)',
               transition: 'all 120ms linear',
             }}
           >
-            {bombText}
+            {displayBombText || '炸弹已安放'}
           </Badge>
         )}
 
-        {bombSecondsLeft !== null && bombProgress !== null && (
+        {((displayBombSecondsLeft !== null && displayBombProgress !== null) || isPreview) && config?.showProgress !== false ? (
           <Group gap={6} align="center">
-            <RingProgress
-              size={36}
-              thickness={4}
-              sections={[{ value: bombProgress, color: bombColor }]}
-              style={{
-                opacity: bombFlashOn ? 1 : 0.4,
-                transition: 'opacity 120ms linear',
-              }}
-            />
-            <Text size="sm" c={bombFlashOn ? 'red.4' : 'red.2'} fw={700}>
-              {bombSecondsLeft.toFixed(2)}s
-            </Text>
+            {config?.showProgress !== false && (
+              <RingProgress
+                size={36}
+                thickness={4}
+                sections={[{ value: displayBombProgress || 50, color: displayBombColor }]}
+                style={{
+                  opacity: (bombFlashOn || isPreview) ? 1 : 0.4,
+                  transition: 'opacity 120ms linear',
+                }}
+              />
+            )}
+            {config?.showText !== false && (
+              <Text size="sm" c={(bombFlashOn || isPreview) ? 'red.4' : 'red.2'} fw={700}>
+                {(displayBombSecondsLeft || 19.0).toFixed(2)}s
+              </Text>
+            )}
           </Group>
-        )}
+        ) : null}
       </Group>
     </Paper>
   );
